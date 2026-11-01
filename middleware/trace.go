@@ -33,7 +33,7 @@ func Trace(opts TraceOptions) gin.HandlerFunc {
 		start := time.Now()
 
 		traceID := c.GetHeader(HeaderTraceID)
-		if traceID == "" {
+		if !validTraceID(traceID) {
 			traceID = uuid.NewString()
 		}
 
@@ -50,6 +50,25 @@ func Trace(opts TraceOptions) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// maxTraceIDLength bounds a client-supplied trace ID.
+const maxTraceIDLength = 64
+
+// validTraceID reports whether a client-supplied trace ID can be reused: 1-64 letters, digits, '-'
+// or '_'. Anything else is replaced, so the ID is safe in logs, headers and HTML alerts.
+func validTraceID(id string) bool {
+	if id == "" || len(id) > maxTraceIDLength {
+		return false
+	}
+
+	for _, r := range id {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+
+	return true
 }
 
 // commitContextKey stores the build commit hash in the Gin context.

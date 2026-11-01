@@ -137,6 +137,33 @@ func TestSendErrorNotification_SentInProduction(t *testing.T) {
 	}
 }
 
+func TestSendErrorNotification_KeepsCredentialsOutOfTheAlert(t *testing.T) {
+	client := &fakeTelegramClient{}
+	n := notification.NewNotifier(client, notification.Options{TelegramChatID: "123", Environment: "production"})
+
+	c := newGinContext(http.MethodPost, "/login?token=query-secret", `{"password":"body-secret"}`)
+	c.Request.Header.Set("Authorization", "Bearer bearer-secret")
+	c.Request.Header.Set("X-Internal-Secret", "header-secret")
+	c.Set("trace_id", `</pre><a href="https://example.invalid">x</a>`)
+
+	n.SendErrorNotification(c, map[string]any{"error": "boom"}, http.StatusInternalServerError)
+
+	msg := client.lastMessage()
+	for _, secret := range []string{"bearer-secret", "header-secret", "query-secret", "body-secret"} {
+		if strings.Contains(msg, secret) {
+			t.Errorf("message contains %q, want it masked or left out:\n%s", secret, msg)
+		}
+	}
+
+	if !strings.Contains(msg, `"Authorization: Bearer ****"`) {
+		t.Errorf("message = %q, want the masked Authorization header kept for debugging", msg)
+	}
+
+	if strings.Contains(msg, `<a href=`) {
+		t.Errorf("message = %q, want the trace ID HTML-escaped", msg)
+	}
+}
+
 func TestSendErrorNotification_WithStackTraceSendsDocument(t *testing.T) {
 	client := &fakeTelegramClient{}
 	n := notification.NewNotifier(client, notification.Options{TelegramChatID: "123", Environment: "production"})

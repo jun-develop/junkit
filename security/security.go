@@ -21,6 +21,11 @@ const (
 type PasswordOptions struct {
 	// Cost is the bcrypt cost (4-31, defaults to bcrypt.DefaultCost when 0).
 	Cost int
+
+	// MaxConcurrent caps how many hashes and compares run at once; the rest wait their turn, so a
+	// login flood cannot take every core from the other routes. Defaults to half of GOMAXPROCS
+	// (at least 1) when <= 0.
+	MaxConcurrent int
 }
 
 // Options configures the security package.

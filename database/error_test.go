@@ -9,13 +9,20 @@ import (
 	"github.com/jun-develop/junkit/database"
 )
 
-// errDuplicate stands in for a driver's unique-violation error.
-var errDuplicate = errors.New("fake driver: duplicate key")
+// errDuplicate and errNoRows stand in for a driver's unique-violation and not-found errors.
+var (
+	errDuplicate = errors.New("fake driver: duplicate key")
+	errNoRows    = errors.New("fake driver: no rows")
+)
 
 func init() {
 	database.RegisterClassifier(func(err error) (database.ErrorType, string, bool) {
 		if errors.Is(err, errDuplicate) {
 			return database.ErrorUniqueViolation, "duplicate", true
+		}
+
+		if errors.Is(err, errNoRows) {
+			return database.ErrorNotFound, "no rows", true
 		}
 
 		return database.ErrorNone, "", false
@@ -58,5 +65,21 @@ func TestMatch(t *testing.T) {
 
 	if !database.IsUniqueViolation(errDuplicate) {
 		t.Fatal("IsUniqueViolation() = false for an error the registered classifier maps to a unique violation")
+	}
+}
+
+func TestMatchNotFound(t *testing.T) {
+	errUserNotFound := errors.New("user not found")
+
+	if got := database.MatchNotFound(nil, errUserNotFound); got != nil {
+		t.Errorf("MatchNotFound(nil) = %v, want nil", got)
+	}
+
+	if got := database.MatchNotFound(fmt.Errorf("get user: %w", errNoRows), errUserNotFound); !errors.Is(got, errUserNotFound) {
+		t.Errorf("MatchNotFound(not found) = %v, want %v", got, errUserNotFound)
+	}
+
+	if got := database.MatchNotFound(errDuplicate, errUserNotFound); !errors.Is(got, errDuplicate) {
+		t.Errorf("MatchNotFound(unique violation) = %v, want the error unchanged", got)
 	}
 }

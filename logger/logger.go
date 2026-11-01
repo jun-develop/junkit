@@ -55,7 +55,9 @@ type Options struct {
 }
 
 // New builds a *zap.Logger from opts and flushes it on Fx stop. Development logs to the stdout
-// console; other environments log JSON to a rotating file.
+// console; other environments log JSON to a rotating file, buffered so a busy server does not make
+// one write syscall per line (each behind the file's lock). The buffer is flushed every second, when
+// it fills, on Fx stop, and on a Panic or Fatal entry; a crash can still lose the last second.
 //
 // Usage:
 //
@@ -73,7 +75,11 @@ func New(lc fx.Lifecycle, opts Options) (*zap.Logger, error) {
 		output = OutputConsole
 	}
 
-	var core zapcore.Core
+	var (
+		core zapcore.Core
+		stop func() error
+	)
+	
 	if output == OutputConsole {
 		consoleEncoderCfg := zap.NewDevelopmentEncoderConfig()
 		consoleEncoderCfg.EncodeTime = zapcore.TimeEncoderOfLayout("2006-01-02 15:04:05")
@@ -87,13 +93,18 @@ func New(lc fx.Lifecycle, opts Options) (*zap.Logger, error) {
 		fileEncoderCfg.EncodeTime = zapcore.TimeEncoderOfLayout(time.RFC3339)
 		fileEncoder := zapcore.NewJSONEncoder(fileEncoderCfg)
 
-		fileWriter := zapcore.AddSync(&lumberjack.Logger{
-			Filename:   opts.Filename,
-			MaxSize:    opts.MaxSize,
-			MaxBackups: opts.MaxBackups,
-			MaxAge:     opts.MaxAge,
-			Compress:   opts.Compress,
-		})
+		fileWriter := &zapcore.BufferedWriteSyncer{
+			WS: zapcore.AddSync(&lumberjack.Logger{
+				Filename:   opts.Filename,
+				MaxSize:    opts.MaxSize,
+				MaxBackups: opts.MaxBackups,
+				MaxAge:     opts.MaxAge,
+				Compress:   opts.Compress,
+			}),
+			Size:          256 << 10,
+			FlushInterval: time.Second,
+		}
+		stop = fileWriter.Stop
 
 		core = zapcore.NewCore(fileEncoder, fileWriter, level)
 	}
@@ -103,6 +114,10 @@ func New(lc fx.Lifecycle, opts Options) (*zap.Logger, error) {
 	lc.Append(fx.Hook{
 		OnStop: func(context.Context) error {
 			_ = zapLogger.Sync()
+			if stop != nil {
+				_ = stop()
+			}
+
 			return nil
 		},
 	})

@@ -138,6 +138,68 @@ func TestAccessLog_MasksSensitiveRequestFields(t *testing.T) {
 	}
 }
 
+func TestAccessLog_MasksFieldsNamedLikeCredentials(t *testing.T) {
+	router, logs := newAccessLogRouterWithPayload(t)
+
+	body := `{"password_confirmation":"p1","reset_token":"t1","clientSecretKey":"s1","name":"Jane"}`
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(httptest.NewRecorder(), req)
+
+	reqPayload := logs.All()[0].ContextMap()["request_payload"].(map[string]any)
+	for _, field := range []string{"password_confirmation", "reset_token", "clientSecretKey"} {
+		if reqPayload[field] != "[MASKED]" {
+			t.Errorf("%s = %v, want it masked", field, reqPayload[field])
+		}
+	}
+
+	if reqPayload["name"] != "Jane" {
+		t.Errorf("name = %v, want it untouched", reqPayload["name"])
+	}
+}
+
+func TestAccessLog_MasksSensitiveQueryParameters(t *testing.T) {
+	router, logs := newAccessLogRouter(middleware.AccessLogOptions{}, func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ping?page=2&reset_token=abc", nil))
+	if got := logs.All()[0].ContextMap()["query"]; got != "page=2&reset_token=%5BMASKED%5D" {
+		t.Errorf("query = %v, want the token value masked", got)
+	}
+
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ping?b=1&a=2", nil))
+	if got := logs.All()[1].ContextMap()["query"]; got != "b=1&a=2" {
+		t.Errorf("query = %v, want it unchanged when nothing is sensitive", got)
+	}
+}
+
+func TestAccessLog_BodiesOnErrorOnly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	core, logs := observer.New(zapcore.InfoLevel)
+
+	router := gin.New()
+	router.Use(middleware.Payload(middleware.PayloadOptions{MaxBodySize: 1 << 20}, newResponder()))
+	router.Use(middleware.AccessLog(zap.New(core), middleware.AccessLogOptions{BodiesOnErrorOnly: true}))
+	router.POST("/ok", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"email": "a@b.com"}) })
+	router.POST("/bad", func(c *gin.Context) { c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid"}) })
+
+	for _, path := range []string{"/ok", "/bad"} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"email":"a@b.com"}`))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	ok, bad := logs.All()[0].ContextMap(), logs.All()[1].ContextMap()
+	if ok["request_payload"] != nil || ok["response_payload"] != nil {
+		t.Errorf("2xx payloads = %v / %v, want both left out", ok["request_payload"], ok["response_payload"])
+	}
+
+	if bad["request_payload"] == nil || bad["response_payload"] == nil {
+		t.Errorf("4xx payloads = %v / %v, want both logged", bad["request_payload"], bad["response_payload"])
+	}
+}
+
 // newAccessLogRouterWithPayload wires Payload before AccessLog for payload testing.
 func newAccessLogRouterWithPayload(t *testing.T) (*gin.Engine, *observer.ObservedLogs) {
 	t.Helper()

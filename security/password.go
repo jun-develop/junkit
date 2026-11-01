@@ -1,6 +1,8 @@
 package security
 
 import (
+	"runtime"
+
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -21,6 +23,7 @@ type PasswordHasher interface {
 type passwordHasher struct {
 	cost      int
 	dummyHash []byte
+	slots     chan struct{}
 }
 
 // NewPasswordHasher creates a PasswordHasher with opts.Password.Cost.
@@ -47,7 +50,18 @@ func NewPasswordHasher(opts Options) (PasswordHasher, error) {
 		return nil, err
 	}
 
-	return &passwordHasher{cost: cost, dummyHash: dummy}, nil
+	limit := opts.Password.MaxConcurrent
+	if limit <= 0 {
+		limit = max(1, runtime.GOMAXPROCS(0)/2)
+	}
+
+	return &passwordHasher{cost: cost, dummyHash: dummy, slots: make(chan struct{}, limit)}, nil
+}
+
+// acquire waits for a free slot and returns its release.
+func (h *passwordHasher) acquire() func() {
+	h.slots <- struct{}{}
+	return func() { <-h.slots }
 }
 
 // Hash implements PasswordHasher; passwords over 72 bytes return ErrPasswordTooLong.
@@ -55,6 +69,8 @@ func (h *passwordHasher) Hash(plain string) (string, error) {
 	if len(plain) > maxPasswordBytes {
 		return "", ErrPasswordTooLong
 	}
+
+	defer h.acquire()()
 
 	b, err := bcrypt.GenerateFromPassword([]byte(plain), h.cost)
 	if err != nil {
@@ -71,6 +87,8 @@ func (h *passwordHasher) Compare(hash, plain string) bool {
 		return false
 	}
 
+	defer h.acquire()()
+
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)) == nil
 }
 
@@ -79,6 +97,8 @@ func (h *passwordHasher) CompareDummy(plain string) {
 	if len(plain) > maxPasswordBytes {
 		plain = plain[:maxPasswordBytes]
 	}
+
+	defer h.acquire()()
 
 	_ = bcrypt.CompareHashAndPassword(h.dummyHash, []byte(plain))
 }

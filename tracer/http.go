@@ -147,8 +147,8 @@ func maskCookie(s string) string {
 // secretHeaderHints are substrings marking a header name as carrying a secret.
 var secretHeaderHints = []string{"token", "secret", "password", "api-key", "apikey", "signature", "session"}
 
-// maskHeader returns value with any secret it carries, as judged by the header name, hidden.
-func maskHeader(name, value string) string {
+// MaskHeader returns value with any secret it carries, as judged by the header name, hidden.
+func MaskHeader(name, value string) string {
 	lower := strings.ToLower(name)
 	switch lower {
 	case "authorization", "proxy-authorization":
@@ -176,7 +176,7 @@ func cloneHeaders(h http.Header) http.Header {
 	for k, vv := range h {
 		masked := make([]string, len(vv))
 		for i, v := range vv {
-			masked[i] = maskHeader(k, v)
+			masked[i] = MaskHeader(k, v)
 		}
 
 		clone[k] = masked

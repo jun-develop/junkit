@@ -248,16 +248,17 @@ run `go doc -all github.com/jun-develop/junkit/<package>` for the complete API.
 | [`pagination`](#10-pagination) | Parses page/page_size/search/sort and computes offset/limit + metadata | — | types |
 | [`database`](#11-database) | Driver-independent error classification; `database/postgres`: pgxpool lifecycle, context-scoped transactions, query logging | `postgres.Module` | `*postgres.DB` |
 | [`cache`](#12-cache) | Generic `Cache[T]` with Redis / in-memory / no-op backends | `Module` | `cache.Cache[any]` |
-| [`storage`](#13-storage) | File upload/delete behind an interface (local filesystem shipped) | `Module` | `storage.Service` |
+| [`storage`](#13-storage) | File upload/delete behind an interface (local filesystem shipped); `upload` checks a file before it is stored | `Module` | `storage.Service` |
 | [`httpclient`](#14-httpclient) | Production-tuned `*http.Client` with retry + exponential backoff | `Module` | `*http.Client` |
 | [`telegram`](#15-telegram) | Minimal Telegram Bot API client (messages, streamed documents) | `Module` | `telegram.Client` |
 | [`notification`](#16-notification) | Panic / error / rate-limit alerts to Telegram with a repro `curl` | `Module` | `notification.Notifier` |
 | [`recaptcha`](#17-recaptcha) | Google reCAPTCHA v3 verification, with a mock for dev/tests | `Module` | `recaptcha.Verifier` |
 | [`security`](#18-security) | Sealed tokens (AES-GCM + HMAC), token hashing, bcrypt, identity in context | `Module` | `TokenSealer`, `PasswordHasher` |
-| [`middleware`](#19-middleware) | CORS, rate limit, recover, security headers, trace, payload, access log, auth, debug | — | `gin.HandlerFunc`s |
+| [`middleware`](#19-middleware) | CORS, rate limit, recover, security headers, trace, payload, access log, route patterns, debug | — | `gin.HandlerFunc`s |
 | [`tracer`](#20-tracer) | Request-scoped debug recorder powering the `?<key>=<value>` dashboard | — | functions |
 | [`sqlfmt`](#21-sqlfmt) | Parse sqlc annotations, bind args into SQL, locate the calling code | — | functions |
 | [`scaffold`](#22-scaffold) | Templated file generation + Fx module (un)registration | — | functions |
+| `slicex` | Slice helpers the standard `slices` package lacks: `Map(s, fn)` (empty input → `[]`, so JSON lists never render as `null`) | — | functions |
 
 **Dependency graph** (what each `Module` needs injected):
 
@@ -309,7 +310,9 @@ Builds a `*zap.Logger`:
 - **`Environment: "development"`** → human-readable console output on stdout.
 - **any other environment** → JSON lines written to `Filename`, rotated by
   [lumberjack](https://github.com/natefinch/lumberjack) (`MaxSize` MB, `MaxBackups`, `MaxAge` days,
-  optional gzip `Compress`).
+  optional gzip `Compress`). Writes are buffered (256 KB, flushed every second, on Fx stop and on a
+  Panic/Fatal entry): one unbuffered write per line took ~17% of a busy API's CPU, behind the file's
+  lock. A crash can lose the last second of lines.
 - Invalid `Level` values fall back to `info`.
 - The logger is flushed (`Sync`) on Fx stop.
 
@@ -535,12 +538,27 @@ if err := c.ShouldBindJSON(&req); err != nil {
 `GetValidationErrors` returns a `map[field]message` for field errors, or a single message string
 for errors not tied to a field (malformed JSON, wrong type, ...).
 
+`BindJSON`, `BindQuery` and `ParseUUID` do the bind and the 422 response in one call; each returns
+`false` once it has written the error response:
+
+```go
+if !validation.BindJSON(c, h.responder, h.validator, &req) { // BindQuery for query strings
+	return
+}
+
+uid, ok := validation.ParseUUID(c, h.responder, h.validator) // the ":uuid" path parameter
+if !ok {
+	return
+}
+```
+
 ### Disposable-email blocklist
 
 `email_advanced` checks domains against a blocklist loaded from
 `validation.DefaultBlocklistPath` (`storage/bootstrap/email_blocklist.conf`, relative to the working
-directory). If the file is missing it is **created from a built-in seed list** on startup. Edit it
-(one domain per line) or load another one:
+directory). If the file is missing it is **created from a built-in seed list** on startup. `go test`
+runs each package in its own folder, so a test that calls `NewValidator` leaves a `storage/` folder
+there — delete it, don't commit it. Edit the file (one domain per line) or load another one:
 
 ```go
 _ = validation.LoadDisposableEmailsFromFile("config/blocklist.conf")
@@ -588,7 +606,7 @@ Two layers, so another engine can be added without touching the PostgreSQL code:
 
 | Package | Contents |
 |---|---|
-| `database` | Driver-independent: error classification (`Classify`, `Match`, `IsNotFound`, ...), `RegisterClassifier`, `MaskDSN` |
+| `database` | Driver-independent: error classification (`Classify`, `Match`, `MatchNotFound`, `IsNotFound`, ...), `RegisterClassifier`, `EscapeLike` (search term → literal inside `LIKE`/`ILIKE`, so `%` and `_` are not wildcards), `MaskDSN` |
 | `database/postgres` | PostgreSQL via [pgx v5](https://github.com/jackc/pgx) `pgxpool`: connection pool, transactions, query logging, Postgres error classifier |
 
 A future engine (e.g. `database/mysql`) is a new sibling package with its own pool, transactions and
@@ -644,9 +662,7 @@ own type (see jungo's `internal/database/primary`).
 func (r *UserRepository) GetByUUID(ctx context.Context, id uuid.UUID) (*domain.User, error) {
 	row, err := sqlc.New(r.db.Executor(ctx)).GetUserByUUID(ctx, id)
 	if err != nil {
-		return nil, database.Match(err, map[database.ErrorType]error{
-			database.ErrorNotFound: domain.ErrUserNotFound,
-		})
+		return nil, database.MatchNotFound(err, domain.ErrUserNotFound)
 	}
 	return mapUser(row), nil
 }
@@ -730,6 +746,23 @@ type Cache[T any] interface {
 `Incr` only works on `Cache[int64]` or `Cache[any]` (otherwise `ErrNotInteger`) — handy for
 fixed-window counters.
 
+`opts.OrMemory()` keeps Redis but turns any other driver into `DriverMemory` — for counters and
+blocks that must work without Redis, since a no-op cache would never block.
+
+**`Invalidatable[T]`** caches values that must be dropped before their TTL when the data behind them
+changes (sessions, permissions). `Invalidate(ctx, marker)` stores the time under a marker;
+`GetOrLoad(ctx, key, markers, load)` treats an entry as a miss when one of `markers(value)` was set
+after the entry's load *started* (plus a 2 s clock-skew margin), so a load that read old data and
+finished after the change is not served. Markers live 2× TTL; `ttl <= 0` disables caching.
+
+```go
+sessions := cache.NewInvalidatable[*Session](opts, 3*time.Minute)
+s, hit, err := sessions.GetOrLoad(ctx, "session:"+hash,
+	func(s *Session) []string { return []string{"family:" + s.Family} },
+	func() (*Session, error) { return repo.GetSession(ctx, hash) })
+_ = sessions.Invalidate(ctx, "family:"+family) // on logout / revoke
+```
+
 **Via Fx** — `cache.Module` provides a `Cache[any]`:
 
 ```go
@@ -794,6 +827,25 @@ url, err := s.storage.UploadFile(ctx, file, header.Filename)
 _ = s.storage.DeleteFile(ctx, oldURL)
 ```
 
+**Check the file first — `upload`.** `storage` stores any bytes under any extension, and `/uploads`
+is public on the API origin, so an uploaded `.html` or `.svg` would run script there. `upload.Open`
+refuses (`upload.ErrInvalidFile`) a file over `Rule.MaxSize`, with an extension outside
+`Rule.Extensions`, or whose first 512 bytes are not one of `Rule.Types` (e.g. PHP renamed to `.png`),
+then rewinds it so the whole file is stored:
+
+```go
+file, err := upload.Open(header, upload.Image(5<<20)) // JPEG, PNG, WebP up to 5 MB
+if err != nil {
+	return // 400
+}
+defer file.Close()
+
+url, err := s.storage.UploadFile(ctx, file, header.Filename)
+```
+
+For other files write a `upload.Rule{MaxSize, Extensions, Types}`; `upload.HasType` and
+`upload.Extension` are the two checks on their own.
+
 ---
 
 ## 14. `httpclient`
@@ -857,9 +909,10 @@ dropped, never returned to the request.
 | Method | Behaviour |
 |---|---|
 | `SendMessageHTML(c, message, type)` | Prefixes an error banner when `type == "error"`, a warning banner otherwise |
-| `SendErrorNotification(c, errData, status, sql...)` | Reports a failed request: location, a **repro `curl` command**, optional SQL; attaches `errData["stack"]` as a document. **Only sends when `Environment == "production"`** |
+| `SendErrorNotification(c, errData, status, sql...)` | Reports a failed request: location, a **repro `curl` command** (method, path and headers; secret header values masked, query string and body left out), optional SQL; attaches `errData["stack"]` as a document. **Only sends when `Environment == "production"`** |
 
-Used automatically by `middleware.Recover` (panics) and `middleware.Limiter` (rate-limit breaches).
+Used automatically by `middleware.Recover` (panics), `middleware.Limiter` (rate-limit breaches) and
+`middleware.Banner` (new bans).
 
 ```go
 fx.Supply(notification.Options{TelegramChatID: chatID, Environment: "production"}),
@@ -935,7 +988,7 @@ hasher.CompareDummy(plain)       // call when the user does NOT exist → same t
 ### Identity in context
 
 ```go
-security.SetIdentity(c, identity)                        // done by middleware.BearerAuth
+security.SetIdentity(c, identity)                        // done by your app's auth middleware (see 26)
 id := security.MustGetIdentity[*domain.Identity](c)      // in handlers behind auth (panics if missing)
 id, ok := security.GetIdentity[*domain.Identity](ctx)    // works with *gin.Context or context.Context
 ctx := security.WithIdentity(context.Background(), id)   // tests / background jobs
@@ -944,7 +997,8 @@ ctx := security.WithIdentity(context.Background(), id)   // tests / background j
 ### Other helpers
 
 `SecureEqual(a, b)` (constant-time compare), `RandomBytes(n)`, `DecodeKey(s)` (base64, standard or
-URL alphabet, padded or not).
+URL alphabet, padded or not), `ClientKey(ip)` (the key to rate-limit or match a client by: an IPv6
+address becomes its `/64` block, so rotating addresses inside it does not reset a limit).
 
 ### Wiring
 
@@ -956,6 +1010,8 @@ fx.Supply(security.Options{
 	TokenHMACSecret:    hmacKey,
 	TokenEncryptionKey: encKey,
 	Password:           security.PasswordOptions{Cost: 12}, // 0 → bcrypt.DefaultCost
+	// MaxConcurrent caps bcrypt calls running at once (default GOMAXPROCS/2), so a login flood
+	// cannot take every core from the other routes; the rest wait their turn.
 }),
 security.Module, // provides TokenSealer + PasswordHasher
 ```
@@ -970,22 +1026,26 @@ Generate keys with `openssl rand -base64 32`. Wrong key sizes fail at startup wi
 Gin middleware. Not an Fx module — call the constructors where you register routes, so each group
 can have its own configuration.
 
+junkit ships only the middleware every app needs to stay safe and easy to build on — security
+headers, tracing, CORS, body limits, rate limiting, panic recovery, access logs, route patterns and
+the debug switch. **Authentication and authorization are app policy and live in the app** (Jungo:
+`internal/middleware` — `BearerAuth`, `RequireSecret` and the permission `Guard`), because every
+app decides differently who may call what. See [26](#26-bearer-token-authentication).
+
 | Middleware | What it does |
 |---|---|
 | `Security()` | Sets HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Cross-Origin-Opener-Policy`, `Cross-Origin-Resource-Policy`, `Permissions-Policy` |
-| `Trace(TraceOptions)` | Reuses the incoming `X-Trace-Id` or generates a UUID; puts it in the request context (`logger.GetTraceID`) and the response header; stores start time, version, env for `response.APIInfo` |
+| `Trace(TraceOptions)` | Reuses the incoming `X-Trace-Id` when it is 1–64 letters, digits, `-` or `_`, otherwise generates a UUID; puts it in the request context (`logger.GetTraceID`) and the response header; stores start time, version, env for `response.APIInfo` |
 | `CORS(CORSOptions)` | Validates origins, answers preflights. With `AllowCredentials` and `"*"`, echoes the request origin (browsers reject `*` with credentials) |
 | `Payload(PayloadOptions, responder)` | Reads and caches the request body (JSON or form) once, enforcing `MaxBodySize` (→ 413), or a larger per-route limit from `RouteLimits` (keyed by `RouteKey(method, pattern)`). Read it with `GetPayload(c)`; raw bytes under `PayloadRawKey` |
-| `Limiter(LimiterOptions, log, responder, notifier)` | Per-IP token-bucket rate limiting (→ 429), sharded maps, idle-client eviction, IP whitelist, throttled logging/alerts |
+| `Limiter(LimiterOptions, log, responder, notifier)` | Per-client token-bucket rate limiting (→ 429; an IPv6 client is its `/64`, see `security.ClientKey`), sharded maps, idle-client eviction, IP whitelist, throttled logging/alerts |
+| `Banner(BannerOptions, log, responder, notifier)` | Bans clients probing the API (→ 403 `access_denied` + `Retry-After`): one request bans at once when `TrapPaths` match its path, if it matched no route (`.env` files such as `/.env.example` or `/production.env`, `/.git`, `.php`, `/wp-admin`, VPN/appliance panels, `../`, ... at any depth), `AttackPatterns` its decoded query (Log4Shell, SQL/command injection, XSS, SSRF to cloud metadata) or `ScannerAgents` its User-Agent (sqlmap, nuclei, ffuf, ...), `MaxStrikes` 401/403/404/405/429 responses within `StrikeWindow` ban too; repeat bans escalate through `BanDurations`. Keyed by `security.ClientKey`, state in a `cache.Cache[int64]` (Redis shares bans across instances), one log/alert per ban. Place it before `Limiter` |
 | `Recover(log, notifier, responder, RecoverOptions)` | Catches panics → logs stack, alerts via `notifier`, responds 500. Lets `tracer.Stop` breakpoints through |
-| `AccessLog(httpLogger, AccessLogOptions)` | Structured request/response log with sensitive-field masking |
-| `BearerAuth[T](authenticator, responder, opts)` | Validates `Authorization: Bearer <token>`, stores the identity via `security.SetIdentity` |
-| `RequireSecret(header, secret, responder)` | Shared-secret guard for internal endpoints (constant-time compare; empty secret denies all) |
+| `AccessLog(httpLogger, AccessLogOptions)` | Structured request/response log with sensitive-field masking (body fields and query parameters; any name containing password, token, secret, api key or authorization is always masked) |
 | `RoutePatterns(patterns, responder)` | Laravel-style `Route::pattern`: a path param named in `patterns` that fails its rule → 404 `api_not_found`, before any route or group middleware. Rules: `IsUUID` (canonical 8-4-4-4-12), `IsID` (positive int64), `IsSlug` (`a-z0-9` joined by single `-`) |
 | `TracerDebug(TracerDebugOptions)` | Turns on the [`tracer`](#20-tracer) dashboard for requests carrying `?<QueryKey>=<QueryValue>` and the `SecretHeader` set to `Secret` (constant-time compare; any empty field disables it) |
 
-Helpers: `BearerToken(c)` extracts the bearer token; `GetPayload(c)` returns the cached body;
-`AuthenticatorFunc[T]` adapts a plain function to `Authenticator[T]`.
+Helpers: `GetPayload(c)` returns the cached body; `RouteKey(method, pattern)` builds a `RouteLimits` key.
 
 ### Options at a glance
 
@@ -1003,16 +1063,29 @@ middleware.LimiterOptions{
 	Burst:             30,
 	CleanupInterval:   time.Minute,      // sweep idle clients
 	ClientTTL:         10 * time.Minute, // evict after this long idle
-	LogTTL:            time.Minute,      // ≤ 1 log/alert per IP per minute
+	LogTTL:            time.Minute,      // ≤ 1 log/alert per client per minute
 	NumShards:         64,
 	IPWhitelist:       []string{"127.0.0.1"},
 }
 
+middleware.BannerOptions{
+	Cache:        cache.New[int64](cacheOpts), // Redis or memory; a no-op cache disables banning
+	MaxStrikes:   30,                          // strike responses...
+	StrikeWindow: time.Minute,                 // ...within this window ban the client
+	BanDurations: []time.Duration{15 * time.Minute, time.Hour, 24 * time.Hour}, // 1st, 2nd, 3rd+ ban
+	IPWhitelist:  []string{"127.0.0.1"},
+	// TrapPaths / AttackPatterns / ScannerAgents / StrikeStatuses default to the Default* values.
+	// Patterns see lowercased input; start each with a literal so it stays fast.
+	// Add one: append(middleware.DefaultTrapPaths, regexp.MustCompile(`/my-trap`));
+	// turn a check off: []*regexp.Regexp{}.
+}
+
 middleware.AccessLogOptions{
-	ExcludedPaths:   []string{"/health", "/metrics"}, // default: /health, /metrics, /favicon.ico
-	SensitiveFields: []string{"password", "token"},   // default: common credential fields
-	MaxBodySize:     100 << 10,                       // response bytes buffered for logging
-	SkipIf:          func(c *gin.Context) bool { return c.Request.Method == http.MethodOptions },
+	ExcludedPaths:     []string{"/health", "/metrics"}, // default: /health, /metrics, /favicon.ico
+	SensitiveFields:   []string{"password", "token"},   // default: common credential fields
+	BodiesOnErrorOnly: true,                            // log payloads only when status >= 400
+	MaxBodySize:       100 << 10,                       // response bytes buffered for logging
+	SkipIf:            func(c *gin.Context) bool { return c.Request.Method == http.MethodOptions },
 }
 
 middleware.TracerDebugOptions{QueryKey: "t_debug", QueryValue: "0604", SecretHeader: "X-Internal-Secret", Secret: secret}
@@ -1023,7 +1096,6 @@ middleware.PayloadOptions{
 	RouteLimits: map[string]int64{middleware.RouteKey(http.MethodPost, "/api/v1/users/:uuid/avatar"): 6 << 20},
 }
 middleware.TraceOptions{Version: "v1.2.0", Commit: "abc123", Environment: "production"}
-middleware.BearerAuthOptions{MessageKey: "unauthorized_token"} // i18n key for a missing token
 ```
 
 ### Per-group configuration
@@ -1033,9 +1105,6 @@ api := r.Group("/api/v1")
 
 auth := api.Group("/auth",
 	middleware.Limiter(middleware.LimiterOptions{RequestsPerSecond: 1, Burst: 5}, log, responder, notifier))
-
-internal := r.Group("/internal",
-	middleware.RequireSecret("X-Internal-Secret", cfg.InternalSecret, responder))
 ```
 
 See [24](#24-recommended-middleware-chain) for the recommended global order.
@@ -1230,6 +1299,7 @@ r.Use(
 	middleware.AccessLog(httpLogger, middleware.AccessLogOptions{}),  // after Trace → has trace ID
 	middleware.CORS(middleware.CORSOptions{AllowOrigins: cfg.AllowOrigins}),
 	middleware.Payload(middleware.PayloadOptions{MaxBodySize: 2 << 20}, responder),
+	middleware.Banner(middleware.BannerOptions{Cache: banCache, MaxStrikes: 30, StrikeWindow: time.Minute, BanDurations: banDurations}, log, responder, notifier),
 	middleware.Limiter(middleware.LimiterOptions{RequestsPerSecond: 10, Burst: 30}, log, responder, notifier),
 	middleware.RoutePatterns(map[string]func(string) bool{"uuid": middleware.IsUUID, "id": middleware.IsID, "slug": middleware.IsSlug}, responder),
 	middleware.Recover(log, notifier, responder, middleware.RecoverOptions{Debug: debugOpts}),
@@ -1241,8 +1311,10 @@ Why this order:
 - `TracerDebug` first so the dashboard wraps the whole chain and can replace the response.
 - `Trace` before anything that logs or responds, so the trace ID and `api_info` are available.
 - `Payload` early so oversized bodies are rejected (413) before any further work.
+- `Banner` before `Limiter`, so a banned client is refused without using up rate-limit tokens and
+  the 429s `Limiter` returns count as strikes.
 - `RoutePatterns` after `Limiter` (junk URLs still count toward the rate limit) and, being global,
-  before every group middleware such as `BearerAuth`.
+  before every group middleware, such as the app's auth middleware.
 - `Recover` last (innermost) so it catches panics from handlers while every other middleware has
   already run.
 
@@ -1292,9 +1364,36 @@ if err != nil {
 
 ## 26. Bearer-token authentication
 
+junkit gives you the pieces — `security.TokenSealer`, `security.HashToken`, the identity context
+helpers — and the app writes the middleware, because who may call what is app policy. Jungo's
+`internal/middleware/auth.go` is a ready-made version (`BearerAuth`, `BearerToken`,
+`RequireSecret`) you can copy. Its core:
+
 ```go
-// 1. Implement Authenticator[T] (or use AuthenticatorFunc)
-authn := middleware.AuthenticatorFunc[*Identity](func(ctx context.Context, token string) (*Identity, error) {
+// in your app, e.g. internal/middleware/auth.go
+func BearerAuth(authenticate func(ctx context.Context, token string) (*Identity, error), responder response.Responder) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		header := c.GetHeader("Authorization")
+		if len(header) < 7 || !strings.EqualFold(header[:7], "bearer ") {
+			responder.Send(c, http.StatusUnauthorized, "unauthorized_token")
+			c.Abort()
+			return
+		}
+
+		identity, err := authenticate(c.Request.Context(), strings.TrimSpace(header[7:]))
+		if err != nil {
+			responder.Error(c, err) // *response.AppError → its status; anything else → 500
+			c.Abort()
+			return
+		}
+
+		security.SetIdentity(c, identity) // handlers: security.MustGetIdentity[*Identity](c)
+		c.Next()
+	}
+}
+
+// authenticate: open the sealed token, look the session up by hash
+authenticate := func(ctx context.Context, token string) (*Identity, error) {
 	raw, err := sealer.Open(token)
 	if err != nil {
 		return nil, response.New(response.Unauthorized, "unauthorized_token")
@@ -1304,21 +1403,12 @@ authn := middleware.AuthenticatorFunc[*Identity](func(ctx context.Context, token
 		return nil, response.New(response.Unauthorized, "unauthorized_token")
 	}
 	return &Identity{UserID: session.UserID}, nil
-})
-
-// 2. Protect a group
-protected := api.Group("", middleware.BearerAuth(authn, responder, middleware.BearerAuthOptions{}))
-
-// 3. Read the caller in handlers
-protected.GET("/me", func(c *gin.Context) {
-	me := security.MustGetIdentity[*Identity](c)
-	responder.SendWithData(c, http.StatusOK, "operation_successful", me)
-})
+}
 ```
 
-Return a `*response.AppError` from `Authenticate` for token problems (→ 401 with your message); any
-other error is answered with 500. A missing header uses `BearerAuthOptions.MessageKey`
-(default `unauthorized_token`).
+For service-to-service routes, compare a shared secret with `security.SecureEqual` (constant time)
+and deny everything while the secret is empty. The i18n keys `unauthorized_token`,
+`forbidden_internal_access` and `insufficient_permission` are built in.
 
 Login side, with timing-safe user lookup:
 

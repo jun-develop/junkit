@@ -24,6 +24,21 @@ type Options struct {
 	Redis RedisOptions
 }
 
+// OrMemory returns opts with DriverMemory unless they select Redis. Use it for counters and
+// blocks that must work without Redis (a no-op cache would never block), accepting that each
+// instance then keeps its own.
+//
+// Usage:
+//
+//	counters := cache.New[int64](opts.OrMemory())
+func (o Options) OrMemory() Options {
+	if o.Driver != DriverRedis {
+		o.Driver = DriverMemory
+	}
+
+	return o
+}
+
 // New builds a Cache[T] for the backend selected by opts.Driver.
 //
 // Usage:

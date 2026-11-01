@@ -3,9 +3,11 @@ package middleware_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/jun-develop/junkit/logger"
 	"github.com/jun-develop/junkit/middleware"
@@ -50,6 +52,35 @@ func TestTrace_PropagatesAnIncomingTraceID(t *testing.T) {
 
 	if got := logger.GetTraceID(c.Request.Context()); got != "incoming-trace-id" {
 		t.Fatalf("logger.GetTraceID() = %q, want %q", got, "incoming-trace-id")
+	}
+}
+
+func TestTrace_ReplacesAnUnsafeIncomingTraceID(t *testing.T) {
+	tests := map[string]string{
+		"markup":   `</pre><a href="https://example.invalid">x</a>`,
+		"spaces":   "trace id",
+		"too long": strings.Repeat("a", 65),
+	}
+
+	for name, incoming := range tests {
+		t.Run(name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+			c.Request.Header.Set(middleware.HeaderTraceID, incoming)
+
+			middleware.Trace(middleware.TraceOptions{})(c)
+
+			got := w.Header().Get(middleware.HeaderTraceID)
+			if got == incoming {
+				t.Fatalf("response trace ID = %q, want a generated ID instead of the unsafe incoming one", got)
+			}
+
+			if _, err := uuid.Parse(got); err != nil {
+				t.Fatalf("response trace ID = %q, want a generated UUID: %v", got, err)
+			}
+		})
 	}
 }
 

@@ -115,3 +115,12 @@ func Match(err error, mapping map[ErrorType]error) error {
 
 	return err
 }
+
+// MatchNotFound returns notFound when err is a not-found error, otherwise err (nil stays nil).
+//
+// Usage:
+//
+//	return nil, database.MatchNotFound(err, domain.ErrUserNotFound)
+func MatchNotFound(err, notFound error) error {
+	return Match(err, map[ErrorType]error{ErrorNotFound: notFound})
+}

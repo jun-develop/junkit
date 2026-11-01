@@ -183,6 +183,9 @@ func TestProvideNamed_EachChannelResolvesByItsTag(t *testing.T) {
 	appLogger.Info("app channel message")
 	httpLogger.Warn("http channel message")
 	sqlLogger.Warn("sql channel message")
+	for _, l := range []*zap.Logger{appLogger, httpLogger, sqlLogger} {
+		_ = l.Sync() // file output is buffered
+	}
 
 	assertFileContains(t, filepath.Join(dir, "app.log"), "app channel message")
 	assertFileContains(t, filepath.Join(dir, "http.log"), "http channel message")
@@ -220,5 +223,28 @@ func assertFileContains(t *testing.T, path, want string) {
 
 	if !strings.Contains(string(data), want) {
 		t.Fatalf("%s = %q, want it to contain %q", path, data, want)
+	}
+}
+
+func TestNew_FileOutputIsBufferedUntilFlushed(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "app.log")
+	lc := &fakeLifecycle{}
+
+	log, err := logger.New(lc, logger.Options{Environment: "production", Level: "info", Filename: logPath, MaxSize: 1})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	log.Info("buffered line")
+	if data, _ := os.ReadFile(logPath); strings.Contains(string(data), "buffered line") {
+		t.Fatal("line reached the file before a flush, want it buffered")
+	}
+
+	if err := lc.hooks[0].OnStop(context.Background()); err != nil {
+		t.Fatalf("OnStop() error = %v", err)
+	}
+
+	if data, _ := os.ReadFile(logPath); !strings.Contains(string(data), "buffered line") {
+		t.Fatal("line missing after OnStop, want it flushed")
 	}
 }

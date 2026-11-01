@@ -4,15 +4,14 @@ package notification
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/jun-develop/junkit/telegram"
+	"github.com/jun-develop/junkit/tracer"
 )
 
 // Notifier sends operational alerts to Telegram. Sends are best-effort: errors are dropped.
@@ -114,7 +113,7 @@ func buildErrorNotification(c *gin.Context, errData map[string]any, statusCode i
 		escapeTelegram(getString(errData, "location")),
 		escapeTelegram(getString(errData, "function")),
 		errData["line"],
-		getTraceID(c),
+		escapeTelegram(getTraceID(c)),
 	))
 
 	sb.WriteString(fmt.Sprintf(
@@ -188,7 +187,9 @@ func escapeTelegram(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
 
-// generateCurlCommand renders a reproducible cURL command for a request.
+// generateCurlCommand renders a cURL command for a request. Secret header values are masked, and
+// the query string and body are left out: the alert is stored in a chat, where credentials they may
+// carry must not end up.
 func generateCurlCommand(c *gin.Context) string {
 	fullURL := getFullRequestURL(c)
 	parts := []string{fmt.Sprintf("curl -X %s %q", c.Request.Method, fullURL)}
@@ -206,12 +207,8 @@ func generateCurlCommand(c *gin.Context) string {
 		}
 
 		for _, v := range values {
-			parts = append(parts, fmt.Sprintf("-H %q", k+": "+v))
+			parts = append(parts, fmt.Sprintf("-H %q", k+": "+tracer.MaskHeader(k, v)))
 		}
-	}
-
-	if body := readAndRestoreBody(c); body != "" {
-		parts = append(parts, fmt.Sprintf("-d '%s'", body))
 	}
 
 	if len(parts) <= 1 {
@@ -230,29 +227,8 @@ func generateCurlCommand(c *gin.Context) string {
 	return sb.String()
 }
 
-// readAndRestoreBody reads and restores the request body for cURL generation.
-func readAndRestoreBody(c *gin.Context) string {
-	if c.Request.Body == nil {
-		return ""
-	}
-
-	bodyBytes, err := io.ReadAll(c.Request.Body)
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-	if err != nil || len(bodyBytes) == 0 {
-		return ""
-	}
-
-	pretty := string(bodyBytes)
-	if json.Unmarshal(bodyBytes, new(any)) == nil {
-		if prettyJSON, err := json.MarshalIndent(json.RawMessage(bodyBytes), "", "  "); err == nil {
-			pretty = string(prettyJSON)
-		}
-	}
-
-	return strings.ReplaceAll(pretty, "'", "'\\''")
-}
-
-// getFullRequestURL reconstructs the request's absolute URL, honoring X-Forwarded-Proto.
+// getFullRequestURL reconstructs the request's absolute URL without its query string, honoring
+// X-Forwarded-Proto.
 func getFullRequestURL(c *gin.Context) string {
 	scheme := "http"
 	if c.Request.TLS != nil {
@@ -261,5 +237,5 @@ func getFullRequestURL(c *gin.Context) string {
 		scheme = proto
 	}
 
-	return fmt.Sprintf("%s://%s%s", scheme, c.Request.Host, c.Request.RequestURI)
+	return fmt.Sprintf("%s://%s%s", scheme, c.Request.Host, c.Request.URL.EscapedPath())
 }

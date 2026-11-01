@@ -68,6 +68,29 @@ func TestLimiter_DifferentIPsHaveIndependentLimits(t *testing.T) {
 	}
 }
 
+func TestLimiter_IPv6ClientIsLimitedByItsSlash64(t *testing.T) {
+	router := newLimiterRouter(baseLimiterOptions(), newFakeNotifier())
+
+	tests := []struct {
+		remoteAddr string
+		want       int
+	}{
+		{"[2001:db8:1:2::1]:1", http.StatusOK},
+		{"[2001:db8:1:2::2]:1", http.StatusTooManyRequests}, // same /64: same bucket
+		{"[2001:db8:1:3::1]:1", http.StatusOK},              // another /64
+	}
+
+	for _, tt := range tests {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = tt.remoteAddr
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, r)
+		if w.Code != tt.want {
+			t.Errorf("request from %s status = %d, want %d", tt.remoteAddr, w.Code, tt.want)
+		}
+	}
+}
+
 func TestLimiter_WhitelistedIPBypassesTheLimit(t *testing.T) {
 	opts := baseLimiterOptions()
 	opts.IPWhitelist = []string{"203.0.113.10"}
@@ -84,22 +107,26 @@ func TestLimiter_WhitelistedIPBypassesTheLimit(t *testing.T) {
 	}
 }
 
-func TestLimiter_KnownTestClientUserAgentsBypass(t *testing.T) {
+// The User-Agent is set by the client, so no value of it may skip the limiter.
+func TestLimiter_UserAgentDoesNotBypass(t *testing.T) {
 	tests := []string{"PostmanRuntime/7.36.0", "GoHttpTest/1.0"}
 
 	for _, ua := range tests {
 		t.Run(ua, func(t *testing.T) {
 			router := newLimiterRouter(baseLimiterOptions(), newFakeNotifier())
 
-			for i := 0; i < 5; i++ {
+			limited := false
+			for i := 0; i < 50 && !limited; i++ {
 				r := httptest.NewRequest(http.MethodGet, "/", nil)
 				r.RemoteAddr = "203.0.113.10:1234"
 				r.Header.Set("User-Agent", ua)
 				w := httptest.NewRecorder()
 				router.ServeHTTP(w, r)
-				if w.Code != http.StatusOK {
-					t.Fatalf("request %d with User-Agent %q status = %d, want %d", i, ua, w.Code, http.StatusOK)
-				}
+				limited = w.Code == http.StatusTooManyRequests
+			}
+
+			if !limited {
+				t.Fatalf("User-Agent %q was never rate limited", ua)
 			}
 		})
 	}

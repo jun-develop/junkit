@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"encoding/json"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -27,6 +28,10 @@ var defaultSensitiveFields = []string{
 	"recaptcha_token", "api_key", "client_secret", "current_password", "old_password",
 }
 
+// sensitiveHints mask any field or query key whose normalized name contains one of them, so names
+// such as password_confirmation or reset_token are masked without being listed.
+var sensitiveHints = []string{"password", "token", "secret", "apikey", "authorization"}
+
 // accessLogHostname is this host's name, attached to every access log entry.
 var accessLogHostname, _ = os.Hostname()
 
@@ -40,9 +45,15 @@ type AccessLogOptions struct {
 	// ExcludedPaths lists request paths to skip. Defaults to /health, /metrics and /favicon.ico.
 	ExcludedPaths []string
 
-	// SensitiveFields lists JSON field names to mask at any depth (case-insensitive, ignoring "_" and
-	// "-"). Defaults to common credential fields such as password, token and authorization.
+	// SensitiveFields lists JSON field and query parameter names to mask at any depth
+	// (case-insensitive, ignoring "_" and "-"). Defaults to common credential fields such as password,
+	// token and authorization. Names containing password, token, secret, api key or authorization are
+	// always masked.
 	SensitiveFields []string
+
+	// BodiesOnErrorOnly logs request and response payloads only for responses with status >= 400, so
+	// the data of successful requests (often personal data) is not stored in the log.
+	BodiesOnErrorOnly bool
 
 	// MaxBodySize caps response bytes buffered for logging. Defaults to 100KB.
 	MaxBodySize int
@@ -126,11 +137,14 @@ func AccessLog(httpLogger *zap.Logger, opts AccessLogOptions) gin.HandlerFunc {
 
 		duration := time.Since(start)
 
-		reqBody := GetPayload(c)
-		sanitizeInPlace(reqBody, sensitiveSet)
+		var reqBody, respBody any
+		if !opts.BodiesOnErrorOnly || c.Writer.Status() >= 400 {
+			reqBody = GetPayload(c)
+			sanitizeInPlace(reqBody, sensitiveSet)
 
-		respBody := parseAccessLogResponseBody(c.Writer.Header().Get("Content-Type"), respBuf.Bytes())
-		sanitizeInPlace(respBody, sensitiveSet)
+			respBody = parseAccessLogResponseBody(c.Writer.Header().Get("Content-Type"), respBuf.Bytes())
+			sanitizeInPlace(respBody, sensitiveSet)
+		}
 
 		var errs any
 		if len(c.Errors) > 0 {
@@ -147,7 +161,7 @@ func AccessLog(httpLogger *zap.Logger, opts AccessLogOptions) gin.HandlerFunc {
 			zap.Int("status", c.Writer.Status()),
 			zap.String("method", c.Request.Method),
 			zap.String("path", c.Request.URL.Path),
-			zap.String("query", c.Request.URL.RawQuery),
+			zap.String("query", maskQuery(c.Request.URL.RawQuery, sensitiveSet)),
 			zap.String("ip", c.ClientIP()),
 			zap.String("user_agent", c.Request.UserAgent()),
 			zap.Int("resp_size", c.Writer.Size()),
@@ -196,7 +210,7 @@ func sanitizeInPlace(data any, sensitive map[string]struct{}) {
 	switch val := data.(type) {
 	case map[string]any:
 		for k, v := range val {
-			if _, ok := sensitive[normalizeFieldName(k)]; ok {
+			if isSensitive(k, sensitive) {
 				val[k] = "[MASKED]"
 				continue
 			}
@@ -208,6 +222,49 @@ func sanitizeInPlace(data any, sensitive map[string]struct{}) {
 			sanitizeInPlace(item, sensitive)
 		}
 	}
+}
+
+// maskQuery returns raw with the values of sensitive parameters masked; raw is kept as is when none
+// is sensitive.
+func maskQuery(raw string, sensitive map[string]struct{}) string {
+	if raw == "" {
+		return ""
+	}
+
+	values, _ := url.ParseQuery(raw)
+	masked := false
+	for k, vv := range values {
+		if isSensitive(k, sensitive) {
+			for i := range vv {
+				vv[i] = "[MASKED]"
+			}
+
+			masked = true
+		}
+	}
+
+	if !masked {
+		return raw
+	}
+
+	return values.Encode()
+}
+
+// isSensitive reports whether a field or parameter name is in sensitive or contains a sensitiveHints
+// entry, after normalizeFieldName.
+func isSensitive(name string, sensitive map[string]struct{}) bool {
+	normalized := normalizeFieldName(name)
+	if _, ok := sensitive[normalized]; ok {
+		return true
+	}
+
+	for _, hint := range sensitiveHints {
+		if strings.Contains(normalized, hint) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // fieldNameReplacer drops the separators normalizeFieldName ignores.

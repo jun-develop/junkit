@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"html"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,9 +14,11 @@ import (
 
 	"github.com/jun-develop/junkit/notification"
 	"github.com/jun-develop/junkit/response"
+	"github.com/jun-develop/junkit/security"
 )
 
-// LimiterOptions configures rate limiting rules for a client IP.
+// LimiterOptions configures rate limiting rules for a client (an IP, or an IPv6 /64; see
+// security.ClientKey).
 type LimiterOptions struct {
 	// RequestsPerSecond is the sustained rate allowed per client IP.
 	RequestsPerSecond int
@@ -238,14 +239,10 @@ func Limiter(opts LimiterOptions, logger *zap.Logger, responder response.Respond
 			return
 		}
 
-		userAgent := ctx.Request.UserAgent()
-		if strings.HasPrefix(userAgent, "PostmanRuntime/") || strings.HasPrefix(userAgent, "GoHttpTest/") {
-			ctx.Next()
-			return
-		}
-
-		if !store.getLimiter(ip).Allow() {
-			if logCache.shouldLog(ip) {
+		// Keyed by ClientKey: an IPv6 client rotating addresses inside its /64 shares one bucket.
+		key := security.ClientKey(ip)
+		if !store.getLimiter(key).Allow() {
+			if logCache.shouldLog(key) {
 				logger.Warn("middleware: rate limit exceeded",
 					zap.String("ip", ip),
 					zap.String("path", ctx.Request.URL.Path),
