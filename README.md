@@ -258,6 +258,7 @@ run `go doc -all github.com/jun-develop/junkit/<package>` for the complete API.
 | [`tracer`](#20-tracer) | Request-scoped debug recorder powering the `?<key>=<value>` dashboard | — | functions |
 | [`sqlfmt`](#21-sqlfmt) | Parse sqlc annotations, bind args into SQL, locate the calling code | — | functions |
 | [`scaffold`](#22-scaffold) | Templated file generation + Fx module (un)registration | — | functions |
+| `mailer` | Transactional email behind `mailer.Sender`; `Options.Driver` picks `smtp` (any provider: Brevo, Resend, SES, Mailgun, ...), `brevo` (HTTP API) or `log` (dev, default) — switching provider is config only | `Module` | `mailer.Sender` |
 | `slicex` | Slice helpers the standard `slices` package lacks: `Map(s, fn)` (empty input → `[]`, so JSON lists never render as `null`) | — | functions |
 
 **Dependency graph** (what each `Module` needs injected):
@@ -275,6 +276,7 @@ telegram.Module      ← telegram.Options, *http.Client, *zap.Logger
 notification.Module  ← notification.Options, telegram.Client
 recaptcha.Module     ← recaptcha.Options, *http.Client
 security.Module      ← security.Options
+mailer.Module        ← mailer.Options, *zap.Logger, *http.Client (optional)
 ```
 
 ---
