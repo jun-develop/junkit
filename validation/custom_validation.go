@@ -16,8 +16,9 @@ import (
 	"github.com/jun-develop/junkit/console"
 )
 
-// DefaultBlocklistPath is the file path for loading disposable email domains.
-const DefaultBlocklistPath = "storage/bootstrap/email_blocklist.conf"
+// DefaultBlocklistPath is the file path for loading disposable email domains. Set it before
+// NewValidator when the working directory is read-only (e.g. under the app's storage dir).
+var DefaultBlocklistPath = "storage/bootstrap/email_blocklist.conf"
 
 // emailRegex and the patterns below back the custom validation rules.
 var (

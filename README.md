@@ -558,7 +558,7 @@ if !ok {
 
 `email_advanced` checks domains against a blocklist loaded from
 `validation.DefaultBlocklistPath` (`storage/bootstrap/email_blocklist.conf`, relative to the working
-directory). If the file is missing it is **created from a built-in seed list** on startup. `go test`
+directory; set it before `NewValidator` to move it). If the file is missing it is **created from a built-in seed list** on startup. `go test`
 runs each package in its own folder, so a test that calls `NewValidator` leaves a `storage/` folder
 there — delete it, don't commit it. Edit the file (one domain per line) or load another one:
 
