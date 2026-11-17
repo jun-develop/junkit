@@ -14,8 +14,8 @@ import (
 	"github.com/jun-develop/junkit/sqlfmt"
 )
 
-// dbtx defines the common query-execution interface shared by pool and transaction handles.
-type dbtx interface {
+// DBTX is the query-execution interface shared by pgx pool and transaction handles.
+type DBTX interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
@@ -50,7 +50,7 @@ type SQLData struct {
 
 // PgxWrapper wraps a pgx pool or transaction handle to record queries on ctx's Debugger.
 type PgxWrapper struct {
-	inner dbtx
+	inner DBTX
 }
 
 // NewPgxWrapper wraps inner, which may be a pool or a pgx.Tx.
@@ -60,11 +60,11 @@ type PgxWrapper struct {
 //	postgres.Options{Decorate: func(inner postgres.DBTX) postgres.DBTX {
 //	    return tracer.NewPgxWrapper(inner)
 //	}}
-func NewPgxWrapper(inner dbtx) *PgxWrapper {
+func NewPgxWrapper(inner DBTX) *PgxWrapper {
 	return &PgxWrapper{inner: inner}
 }
 
-// Exec implements dbtx; it records rows affected when ctx has a Debugger.
+// Exec implements DBTX; it records rows affected when ctx has a Debugger.
 func (w *PgxWrapper) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	q := BeginQuery(ctx, sql, args, sqlfmt.Bind)
 	if q == nil {
@@ -78,7 +78,7 @@ func (w *PgxWrapper) Exec(ctx context.Context, sql string, args ...any) (pgconn.
 	return tag, err
 }
 
-// Query implements dbtx; it records scanned rows when ctx has a Debugger.
+// Query implements DBTX; it records scanned rows when ctx has a Debugger.
 func (w *PgxWrapper) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	q := BeginQuery(ctx, sql, args, sqlfmt.Bind)
 	if q == nil {
@@ -94,7 +94,7 @@ func (w *PgxWrapper) Query(ctx context.Context, sql string, args ...any) (pgx.Ro
 	return &tracedRows{Rows: rows, q: q}, nil
 }
 
-// QueryRow implements dbtx; it records the scanned row when ctx has a Debugger.
+// QueryRow implements DBTX; it records the scanned row when ctx has a Debugger.
 func (w *PgxWrapper) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	q := BeginQuery(ctx, sql, args, sqlfmt.Bind)
 	if q == nil {

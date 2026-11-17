@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,16 +11,23 @@ import (
 	"github.com/jun-develop/junkit/storage"
 )
 
-func TestNewLocalService_CreatesBaseDir(t *testing.T) {
+// baseURL is the public prefix every test service serves files under.
+const baseURL = "http://localhost:8080/uploads"
+
+// newService returns a LocalService rooted at a fresh directory, and that directory.
+func newService(t *testing.T) (*storage.LocalService, string) {
+	t.Helper()
 	dir := filepath.Join(t.TempDir(), "uploads")
-
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("test setup invariant broken: %s should not exist yet", dir)
-	}
-
-	if _, err := storage.NewLocalService(dir, "http://localhost/uploads"); err != nil {
+	svc, err := storage.NewLocalService(storage.Options{BaseDir: dir, BaseURL: baseURL + "/"})
+	if err != nil {
 		t.Fatalf("NewLocalService() error = %v", err)
 	}
+
+	return svc, dir
+}
+
+func TestNewLocalService_CreatesBaseDir(t *testing.T) {
+	_, dir := newService(t)
 
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		t.Fatalf("NewLocalService() did not create %s as a directory", dir)
@@ -27,127 +35,126 @@ func TestNewLocalService_CreatesBaseDir(t *testing.T) {
 }
 
 func TestLocalService_UploadFile(t *testing.T) {
-	dir := t.TempDir()
-	svc, err := storage.NewLocalService(dir, "http://localhost:8080/uploads")
-	if err != nil {
-		t.Fatalf("NewLocalService() error = %v", err)
+	tests := []struct {
+		name     string
+		filename string
+		wantExt  string
+		wantErr  error
+	}{
+		{name: "keeps the extension", filename: "avatar.png", wantExt: ".png"},
+		{name: "lowercases the extension", filename: "avatar.JPG", wantExt: ".jpg"},
+		{name: "rejects html", filename: "page.html", wantErr: storage.ErrUnsafeExtension},
+		{name: "rejects svg in any case", filename: "logo.SVG", wantErr: storage.ErrUnsafeExtension},
+		{name: "rejects js", filename: "app.mjs", wantErr: storage.ErrUnsafeExtension},
+		{name: "rejects no extension", filename: "avatar", wantErr: storage.ErrUnsafeExtension},
 	}
 
-	content := "avatar bytes"
-	url, err := svc.UploadFile(context.Background(), strings.NewReader(content), "avatar.png")
-	if err != nil {
-		t.Fatalf("UploadFile() error = %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, dir := newService(t)
 
-	if !strings.HasPrefix(url, "http://localhost:8080/uploads/") {
-		t.Fatalf("UploadFile() url = %q, want it prefixed with the base URL", url)
-	}
+			url, err := svc.UploadFile(context.Background(), strings.NewReader("bytes"), tt.filename)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("UploadFile() error = %v, want %v", err, tt.wantErr)
+			}
 
-	if !strings.HasSuffix(url, ".png") {
-		t.Fatalf("UploadFile() url = %q, want the original extension preserved", url)
-	}
+			if tt.wantErr != nil {
+				return
+			}
 
-	filename := filepath.Base(url)
-	data, err := os.ReadFile(filepath.Join(dir, filename))
-	if err != nil {
-		t.Fatalf("uploaded file not found on disk at %s: %v", filename, err)
-	}
+			if !strings.HasPrefix(url, baseURL+"/") || strings.HasPrefix(url, baseURL+"//") {
+				t.Fatalf("UploadFile() url = %q, want it under %s/", url, baseURL)
+			}
 
-	if string(data) != content {
-		t.Fatalf("file contents = %q, want %q", data, content)
+			if filepath.Ext(url) != tt.wantExt {
+				t.Fatalf("UploadFile() url = %q, want extension %s", url, tt.wantExt)
+			}
+
+			data, err := os.ReadFile(filepath.Join(dir, filepath.Base(url)))
+			if err != nil || string(data) != "bytes" {
+				t.Fatalf("stored file = %q, %v; want %q", data, err, "bytes")
+			}
+		})
 	}
 }
 
-func TestLocalService_UploadFile_UniqueNamesPerCall(t *testing.T) {
-	dir := t.TempDir()
-	svc, _ := storage.NewLocalService(dir, "http://localhost/uploads")
+func TestLocalService_UploadFileUniqueNames(t *testing.T) {
+	svc, _ := newService(t)
 
-	url1, err := svc.UploadFile(context.Background(), strings.NewReader("a"), "same-name.jpg")
-	if err != nil {
-		t.Fatalf("UploadFile() error = %v", err)
-	}
-
-	url2, err := svc.UploadFile(context.Background(), strings.NewReader("b"), "same-name.jpg")
-	if err != nil {
-		t.Fatalf("UploadFile() error = %v", err)
+	url1, err1 := svc.UploadFile(context.Background(), strings.NewReader("a"), "same-name.jpg")
+	url2, err2 := svc.UploadFile(context.Background(), strings.NewReader("b"), "same-name.jpg")
+	if err1 != nil || err2 != nil {
+		t.Fatalf("UploadFile() errors = %v, %v", err1, err2)
 	}
 
 	if url1 == url2 {
-		t.Fatalf("two uploads of the same original filename produced the same stored URL: %q", url1)
+		t.Fatalf("two uploads of the same filename produced the same URL: %q", url1)
+	}
+}
+
+func TestLocalService_UploadFileCancelled(t *testing.T) {
+	svc, dir := newService(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := svc.UploadFile(ctx, strings.NewReader("a"), "a.png"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("UploadFile() error = %v, want context.Canceled", err)
+	}
+
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("cancelled upload left %d files behind", len(entries))
 	}
 }
 
 func TestLocalService_DeleteFile(t *testing.T) {
-	dir := t.TempDir()
-	svc, _ := storage.NewLocalService(dir, "http://localhost/uploads")
-
-	url, err := svc.UploadFile(context.Background(), strings.NewReader("content"), "a.txt")
-	if err != nil {
-		t.Fatalf("UploadFile() error = %v", err)
+	tests := []struct {
+		name    string
+		url     func(uploaded string) string
+		wantErr error
+		gone    bool
+	}{
+		{name: "deletes an uploaded file", url: func(u string) string { return u }, gone: true},
+		{name: "missing file is not an error", url: func(string) string { return baseURL + "/missing.png" }},
+		{name: "other host is rejected", wantErr: storage.ErrInvalidURL,
+			url: func(u string) string { return "http://evil.example/uploads/" + filepath.Base(u) }},
+		{name: "empty", url: func(string) string { return "" }, wantErr: storage.ErrInvalidURL},
+		{name: "bare base URL", url: func(string) string { return baseURL + "/" }, wantErr: storage.ErrInvalidURL},
+		{name: "dot dot", url: func(string) string { return baseURL + "/.." }, wantErr: storage.ErrInvalidURL},
+		{name: "nested path", url: func(string) string { return baseURL + "/x/.." }, wantErr: storage.ErrInvalidURL},
+		{name: "backslash", url: func(string) string { return baseURL + `/..\x` }, wantErr: storage.ErrInvalidURL},
 	}
 
-	if err := svc.DeleteFile(context.Background(), url); err != nil {
-		t.Fatalf("DeleteFile() error = %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, dir := newService(t)
+			uploaded, err := svc.UploadFile(context.Background(), strings.NewReader("x"), "a.txt")
+			if err != nil {
+				t.Fatalf("UploadFile() error = %v", err)
+			}
 
-	if _, err := os.Stat(filepath.Join(dir, filepath.Base(url))); !os.IsNotExist(err) {
-		t.Fatal("file still exists on disk after DeleteFile()")
+			if err := svc.DeleteFile(context.Background(), tt.url(uploaded)); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("DeleteFile() error = %v, want %v", err, tt.wantErr)
+			}
+
+			_, statErr := os.Stat(filepath.Join(dir, filepath.Base(uploaded)))
+			if gone := os.IsNotExist(statErr); gone != tt.gone {
+				t.Fatalf("file gone = %v, want %v", gone, tt.gone)
+			}
+		})
 	}
 }
 
-func TestLocalService_DeleteFile_MissingFileIsNotAnError(t *testing.T) {
-	dir := t.TempDir()
-	svc, _ := storage.NewLocalService(dir, "http://localhost/uploads")
+func TestLocalService_DeleteFileRemovalError(t *testing.T) {
+	svc, dir := newService(t)
 
-	if err := svc.DeleteFile(context.Background(), "http://localhost/uploads/does-not-exist.png"); err != nil {
-		t.Fatalf("DeleteFile() on a missing file error = %v, want nil", err)
-	}
-}
-
-func TestLocalService_DeleteFile_GenuineRemovalErrorIsReturned(t *testing.T) {
-	dir := t.TempDir()
-	svc, _ := storage.NewLocalService(dir, "http://localhost/uploads")
-
-	// os.Remove fails on a non-empty directory with an error other than
-	// "not exist" — the one DeleteFile is documented to swallow silently.
+	// os.Remove fails on a non-empty directory with an error other than "not exist".
 	nested := filepath.Join(dir, "not-a-plain-file")
-	if err := os.Mkdir(nested, 0o755); err != nil {
-		t.Fatalf("test setup: failed to create nested dir: %v", err)
+	if err := os.MkdirAll(filepath.Join(nested, "child"), 0o755); err != nil {
+		t.Fatalf("create nested dir: %v", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(nested, "child"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("test setup: failed to create nested file: %v", err)
-	}
-
-	if err := svc.DeleteFile(context.Background(), "http://localhost/uploads/not-a-plain-file"); err == nil {
-		t.Fatal("DeleteFile() error = nil, want a genuine removal error for a non-empty directory")
-	}
-}
-
-func TestLocalService_DeleteFile_InvalidURL(t *testing.T) {
-	dir := t.TempDir()
-	svc, _ := storage.NewLocalService(dir, "http://localhost/uploads")
-
-	tests := []string{"", "/", "."}
-	for _, url := range tests {
-		if err := svc.DeleteFile(context.Background(), url); err == nil {
-			t.Errorf("DeleteFile(%q) error = nil, want an error for an invalid URL", url)
-		}
-	}
-}
-
-func TestLocalService_DeleteFile_RejectsPathsOutsideBaseDir(t *testing.T) {
-	parent := t.TempDir()
-	dir := filepath.Join(parent, "uploads")
-	svc, _ := storage.NewLocalService(dir, "http://localhost/uploads")
-
-	for _, url := range []string{"x/..", "..", "http://localhost/uploads/"} {
-		if err := svc.DeleteFile(context.Background(), url); err == nil {
-			t.Errorf("DeleteFile(%q) error = nil, want an error", url)
-		}
-	}
-
-	if _, err := os.Stat(dir); err != nil {
-		t.Fatalf("base dir was removed: %v", err)
+	err := svc.DeleteFile(context.Background(), baseURL+"/not-a-plain-file")
+	if err == nil || errors.Is(err, storage.ErrInvalidURL) {
+		t.Fatalf("DeleteFile() error = %v, want a removal error", err)
 	}
 }

@@ -1,5 +1,12 @@
-// Package security provides token sealing, token hashing, password hashing and identity
-// context helpers.
+// Package security provides token sealing, token hashing, password hashing, secret-name
+// detection and identity context helpers.
+//
+// Usage:
+//
+//	fx.New(
+//	    fx.Supply(security.Options{TokenHMACSecret: hmacKey, TokenEncryptionKey: encKey}),
+//	    security.Module,
+//	)
 package security
 
 import (
@@ -60,7 +67,8 @@ func (o Options) validateTokenKeys() error {
 //	secret := security.RandomBytes(security.MinHMACSecretSize)
 func RandomBytes(n int) []byte {
 	b := make([]byte, n)
-	_, _ = rand.Read(b) // never returns an error
+	// crypto/rand.Read never returns an error (it crashes the program instead).
+	_, _ = rand.Read(b)
 
 	return b
 }

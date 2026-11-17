@@ -20,13 +20,14 @@ type fakeLifecycle struct {
 	hooks []fx.Hook
 }
 
+// Append records h.
 func (f *fakeLifecycle) Append(h fx.Hook) {
 	f.hooks = append(f.hooks, h)
 }
 
 func TestNew_DevelopmentLogsToStdoutOnly(t *testing.T) {
 	lc := &fakeLifecycle{}
-	log, err := logger.New(lc, logger.Options{Environment: "development", Level: "debug"})
+	log, err := logger.New(logger.Options{Environment: "development", Level: "debug"}, lc)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -52,17 +53,18 @@ func TestNew_NonDevelopmentWritesToFile(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "app.log")
 	lc := &fakeLifecycle{}
 
-	log, err := logger.New(lc, logger.Options{
+	log, err := logger.New(logger.Options{
 		Environment: "production",
 		Level:       "info",
 		Filename:    logPath,
 		MaxSize:     1,
-	})
+	}, lc)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
 	log.Info("hello from the test")
+
 	if err := lc.hooks[0].OnStop(context.Background()); err != nil {
 		t.Fatalf("OnStop() error = %v", err)
 	}
@@ -81,18 +83,19 @@ func TestNew_OutputFileOverridesDevelopment(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "app.log")
 	lc := &fakeLifecycle{}
 
-	log, err := logger.New(lc, logger.Options{
+	log, err := logger.New(logger.Options{
 		Environment: "development",
 		Output:      logger.OutputFile,
 		Level:       "info",
 		Filename:    logPath,
 		MaxSize:     1,
-	})
+	}, lc)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
 	log.Info("hello from the test")
+
 	if err := lc.hooks[0].OnStop(context.Background()); err != nil {
 		t.Fatalf("OnStop() error = %v", err)
 	}
@@ -102,23 +105,45 @@ func TestNew_OutputFileOverridesDevelopment(t *testing.T) {
 	}
 }
 
-func TestNew_InvalidLevelFallsBackToInfo(t *testing.T) {
-	lc := &fakeLifecycle{}
-	log, err := logger.New(lc, logger.Options{Environment: "development", Level: "not-a-real-level"})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
+func TestNew_Level(t *testing.T) {
+	tests := []struct {
+		name      string
+		level     string
+		wantErr   bool
+		wantDebug bool
+	}{
+		{name: "empty defaults to info", level: ""},
+		{name: "debug enables debug", level: "debug", wantDebug: true},
+		{name: "invalid level is an error", level: "not-a-real-level", wantErr: true},
 	}
 
-	if log.Core().Enabled(zapcore.DebugLevel) {
-		t.Error("debug should not be enabled when falling back to the info default")
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			log, err := logger.New(logger.Options{Environment: "development", Level: tt.level}, &fakeLifecycle{})
+			if tt.wantErr {
+				if err == nil || !strings.HasPrefix(err.Error(), "logger: ") {
+					t.Fatalf("New() error = %v, want a \"logger: ...\" error", err)
+				}
 
-	if !log.Core().Enabled(zapcore.InfoLevel) {
-		t.Error("info should be enabled by the default level")
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			if got := log.Core().Enabled(zapcore.DebugLevel); got != tt.wantDebug {
+				t.Errorf("debug enabled = %v, want %v", got, tt.wantDebug)
+			}
+
+			if !log.Core().Enabled(zapcore.InfoLevel) {
+				t.Error("info should be enabled")
+			}
+		})
 	}
 }
 
-func TestWithTraceIDAndGetTraceID(t *testing.T) {
+func TestGetTraceID_RoundTripsWithTraceID(t *testing.T) {
 	if got := logger.GetTraceID(context.Background()); got != "" {
 		t.Fatalf("GetTraceID() on a plain context = %q, want empty", got)
 	}
@@ -135,12 +160,12 @@ func TestGetTraceID_NilContext(t *testing.T) {
 	}
 }
 
-func TestGetTraceID_FallsBackToRawStringKey(t *testing.T) {
-	// A generic middleware outside this package's control might set the
-	// trace ID under the raw string key "trace_id" instead of logger.TraceIDKey.
-	ctx := context.WithValue(context.Background(), "trace_id", "raw-key-trace-id") //nolint:staticcheck // testing the documented fallback
-	if got := logger.GetTraceID(ctx); got != "raw-key-trace-id" {
-		t.Fatalf("GetTraceID() = %q, want the fallback raw-string-key value", got)
+func TestGetTraceID_IgnoresRawStringKey(t *testing.T) {
+	// WithTraceID is the single source; a raw "trace_id" string key must not be read.
+	//nolint:staticcheck
+	ctx := context.WithValue(context.Background(), "trace_id", "raw-key-trace-id")
+	if got := logger.GetTraceID(ctx); got != "" {
+		t.Fatalf("GetTraceID() = %q, want empty", got)
 	}
 }
 
@@ -184,7 +209,8 @@ func TestProvideNamed_EachChannelResolvesByItsTag(t *testing.T) {
 	httpLogger.Warn("http channel message")
 	sqlLogger.Warn("sql channel message")
 	for _, l := range []*zap.Logger{appLogger, httpLogger, sqlLogger} {
-		_ = l.Sync() // file output is buffered
+		// Best-effort flush of the buffered file output; the file assertions below catch failures.
+		_ = l.Sync()
 	}
 
 	assertFileContains(t, filepath.Join(dir, "app.log"), "app channel message")
@@ -230,12 +256,13 @@ func TestNew_FileOutputIsBufferedUntilFlushed(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "app.log")
 	lc := &fakeLifecycle{}
 
-	log, err := logger.New(lc, logger.Options{Environment: "production", Level: "info", Filename: logPath, MaxSize: 1})
+	log, err := logger.New(logger.Options{Environment: "production", Level: "info", Filename: logPath, MaxSize: 1}, lc)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
 	log.Info("buffered line")
+
 	if data, _ := os.ReadFile(logPath); strings.Contains(string(data), "buffered line") {
 		t.Fatal("line reached the file before a flush, want it buffered")
 	}

@@ -2,10 +2,9 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/jun-develop/junkit/console"
 )
 
 // txContextKey is the context key under which d's active transaction is stored. It carries the
@@ -45,7 +44,7 @@ func (d *DB) WithTransaction(ctx context.Context, fn func(context.Context) error
 
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
-		return console.NewError("begin transaction: %w", err)
+		return fmt.Errorf("postgres: begin transaction: %w", err)
 	}
 
 	defer func() {
@@ -55,7 +54,7 @@ func (d *DB) WithTransaction(ctx context.Context, fn func(context.Context) error
 		} else if err != nil {
 			_ = tx.Rollback(ctx)
 		} else if commitErr := tx.Commit(ctx); commitErr != nil {
-			err = console.NewError("commit transaction: %w", commitErr)
+			err = fmt.Errorf("postgres: commit transaction: %w", commitErr)
 		}
 	}()
 

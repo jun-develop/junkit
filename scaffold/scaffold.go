@@ -3,6 +3,7 @@ package scaffold
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,7 +42,8 @@ type FeatureData struct {
 // Usage:
 //
 //	data := scaffold.NewFeatureData("product", "jungo", "")
-//	// data.Pascal == "Product", data.Camel == "product", data.Table == "products", data.Model == "Product"
+//	// data.Pascal == "Product", data.Camel == "product"
+//	// data.Table == "products", data.Model == "Product"
 func NewFeatureData(name, module, table string) FeatureData {
 	plural := pluralize(name)
 	if table == "" {
@@ -59,7 +61,8 @@ func NewFeatureData(name, module, table string) FeatureData {
 	}
 }
 
-// pluralize applies the regular English plural rules (e.g. "category" -> "categories", "box" -> "boxes").
+// pluralize applies the regular English plural rules (e.g. "category" -> "categories",
+// "box" -> "boxes").
 func pluralize(s string) string {
 	switch {
 	case len(s) > 1 && strings.HasSuffix(s, "y") && !strings.ContainsAny(s[len(s)-2:len(s)-1], "aeiou"):
@@ -127,8 +130,8 @@ type File struct {
 	Template string
 }
 
-// GenerateConfig configures feature code generation.
-type GenerateConfig struct {
+// GenerateOptions configures feature code generation.
+type GenerateOptions struct {
 	// Data is passed to every entry in Files.
 	Data FeatureData
 
@@ -149,10 +152,10 @@ type GenerateConfig struct {
 }
 
 // Generate renders template files and registers the module in the Fx composition root.
-func Generate(cfg GenerateConfig) error {
+func Generate(cfg GenerateOptions) error {
 	for _, f := range cfg.Files {
 		if _, err := os.Stat(f.Path); err == nil {
-			return console.NewError("%s already exists — refusing to overwrite", f.Path)
+			return fmt.Errorf("scaffold: %s already exists — refusing to overwrite", f.Path)
 		}
 	}
 
@@ -161,7 +164,7 @@ func Generate(cfg GenerateConfig) error {
 	for i, f := range cfg.Files {
 		out, err := renderTemplate(f, cfg.Data)
 		if err != nil {
-			return err
+			return fmt.Errorf("scaffold: %w", err)
 		}
 
 		rendered[i] = out
@@ -170,10 +173,11 @@ func Generate(cfg GenerateConfig) error {
 	for i, f := range cfg.Files {
 		if err := writeFile(f.Path, rendered[i]); err != nil {
 			for _, written := range cfg.Files[:i] {
+				// Best effort rollback; the write error below is what the caller needs.
 				_ = os.Remove(written.Path)
 			}
 
-			return err
+			return fmt.Errorf("scaffold: %w", err)
 		}
 
 		console.Successf("Created %s", f.Path)
@@ -185,11 +189,11 @@ func Generate(cfg GenerateConfig) error {
 
 	console.Stepf("→", "Registering %s in %s", cfg.ImportPath, cfg.FxFile)
 	if err := addImportLine(cfg.FxFile, cfg.ImportPath, cfg.Data.Module); err != nil {
-		return console.NewError("add import: %w", err)
+		return fmt.Errorf("scaffold: add import: %w", err)
 	}
 
 	if err := addModuleLine(cfg.FxFile, cfg.Marker, cfg.ModuleLine); err != nil {
-		return console.NewError("add module line: %w", err)
+		return fmt.Errorf("scaffold: add module line: %w", err)
 	}
 
 	if err := gofmtPaths([]string{cfg.FxFile}); err != nil {
@@ -205,12 +209,12 @@ func Generate(cfg GenerateConfig) error {
 func renderTemplate(f File, data FeatureData) ([]byte, error) {
 	tmpl, err := template.New(f.Path).Parse(f.Template)
 	if err != nil {
-		return nil, console.NewError("parse template for %s: %w", f.Path, err)
+		return nil, fmt.Errorf("parse template for %s: %w", f.Path, err)
 	}
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
-		return nil, console.NewError("render %s: %w", f.Path, err)
+		return nil, fmt.Errorf("render %s: %w", f.Path, err)
 	}
 
 	return buf.Bytes(), nil
@@ -219,11 +223,11 @@ func renderTemplate(f File, data FeatureData) ([]byte, error) {
 // writeFile writes content to path, creating parent directories.
 func writeFile(path string, content []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return console.NewError("create directory for %s: %w", path, err)
+		return fmt.Errorf("create directory for %s: %w", path, err)
 	}
 
 	if err := os.WriteFile(path, content, 0o644); err != nil {
-		return console.NewError("create %s: %w", path, err)
+		return fmt.Errorf("create %s: %w", path, err)
 	}
 
 	return nil

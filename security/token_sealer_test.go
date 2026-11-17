@@ -9,6 +9,7 @@ import (
 	"github.com/jun-develop/junkit/security"
 )
 
+// testOptions returns valid token keys filled with fill.
 func testOptions(fill byte) security.Options {
 	return security.Options{
 		TokenHMACSecret:    bytes.Repeat([]byte{fill}, security.MinHMACSecretSize),
@@ -16,6 +17,7 @@ func testOptions(fill byte) security.Options {
 	}
 }
 
+// newSealer returns a TokenSealer keyed by fill.
 func newSealer(t testing.TB, fill byte) security.TokenSealer {
 	t.Helper()
 	s, err := security.NewTokenSealer(testOptions(fill))
@@ -26,6 +28,7 @@ func newSealer(t testing.TB, fill byte) security.TokenSealer {
 	return s
 }
 
+// TestTokenSealer_RoundTrip checks that Open returns what Seal sealed.
 func TestTokenSealer_RoundTrip(t *testing.T) {
 	s := newSealer(t, 1)
 	raw := security.GenerateToken()
@@ -53,6 +56,7 @@ func TestTokenSealer_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestTokenSealer_SealIsRandomized checks that each seal uses a fresh nonce.
 func TestTokenSealer_SealIsRandomized(t *testing.T) {
 	s := newSealer(t, 1)
 	a, _ := s.Seal("same")
@@ -62,6 +66,7 @@ func TestTokenSealer_SealIsRandomized(t *testing.T) {
 	}
 }
 
+// TestTokenSealer_TamperedSegmentsRejected checks that altered tokens fail to open.
 func TestTokenSealer_TamperedSegmentsRejected(t *testing.T) {
 	s := newSealer(t, 1)
 	token, _ := s.Seal("payload")
@@ -96,6 +101,7 @@ func TestTokenSealer_TamperedSegmentsRejected(t *testing.T) {
 	}
 }
 
+// TestTokenSealer_OtherSecretRejected checks that a different key rejects a token.
 func TestTokenSealer_OtherSecretRejected(t *testing.T) {
 	token, _ := newSealer(t, 1).Seal("payload")
 	if _, err := newSealer(t, 9).Open(token); !errors.Is(err, security.ErrBadSignature) {
@@ -103,6 +109,7 @@ func TestTokenSealer_OtherSecretRejected(t *testing.T) {
 	}
 }
 
+// TestNewTokenSealer_InvalidOptions checks key length validation.
 func TestNewTokenSealer_InvalidOptions(t *testing.T) {
 	shortHMAC := testOptions(1)
 	shortHMAC.TokenHMACSecret = []byte("short")

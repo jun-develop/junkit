@@ -18,14 +18,14 @@ func TestSecurity(t *testing.T) {
 		c, _ := gin.CreateTestContext(w)
 		c.Request = httptest.NewRequest("GET", "/", nil)
 
-		middleware.Security()(c)
+		middleware.Security(middleware.SecurityOptions{})(c)
 
 		tests := map[string]string{
 			"X-Content-Type-Options":       "nosniff",
 			"X-Frame-Options":              "DENY",
 			"Referrer-Policy":              "strict-origin-when-cross-origin",
 			"Cross-Origin-Opener-Policy":   "same-origin-allow-popups",
-			"Cross-Origin-Resource-Policy": "cross-origin",
+			"Cross-Origin-Resource-Policy": "same-site",
 			"Permissions-Policy":           "camera=(), microphone=(), geolocation=()",
 		}
 		for header, want := range tests {
@@ -40,7 +40,7 @@ func TestSecurity(t *testing.T) {
 		c, _ := gin.CreateTestContext(w)
 		c.Request = httptest.NewRequest("GET", "/", nil)
 
-		middleware.Security()(c)
+		middleware.Security(middleware.SecurityOptions{})(c)
 
 		if got := w.Header().Get("Strict-Transport-Security"); got != "" {
 			t.Errorf("Strict-Transport-Security = %q over plain HTTP, want empty", got)
@@ -53,10 +53,22 @@ func TestSecurity(t *testing.T) {
 		c.Request = httptest.NewRequest("GET", "/", nil)
 		c.Request.TLS = &tls.ConnectionState{}
 
-		middleware.Security()(c)
+		middleware.Security(middleware.SecurityOptions{})(c)
 
 		if got := w.Header().Get("Strict-Transport-Security"); got == "" {
 			t.Error("Strict-Transport-Security should be set for a TLS request")
+		}
+	})
+
+	t.Run("ForceHSTS and CORP are configurable", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest("GET", "/", nil)
+
+		middleware.Security(middleware.SecurityOptions{ForceHSTS: true, CrossOriginResourcePolicy: "cross-origin"})(c)
+
+		if w.Header().Get("Strict-Transport-Security") == "" || w.Header().Get("Cross-Origin-Resource-Policy") != "cross-origin" {
+			t.Errorf("headers = %v, want HSTS without TLS and CORP cross-origin", w.Header())
 		}
 	})
 }

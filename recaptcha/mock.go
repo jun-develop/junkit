@@ -6,10 +6,6 @@ import "context"
 type MockVerifier struct{}
 
 // NewMockVerifier creates a MockVerifier that accepts every token unconditionally.
-//
-// Usage:
-//
-//	verifier := recaptcha.NewMockVerifier()
 func NewMockVerifier() *MockVerifier {
 	return &MockVerifier{}
 }

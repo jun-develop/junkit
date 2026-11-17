@@ -6,8 +6,6 @@ import (
 	"maps"
 	"strings"
 	"sync"
-
-	"go.uber.org/fx"
 )
 
 // LangEN and LangVI are the supported language codes; only LangEN has a built-in catalog.
@@ -38,17 +36,11 @@ func NewTranslator() *Translator {
 		translations: make(map[string]map[string]string),
 		defaultLang:  LangEN,
 	}
+
 	t.loadDefaultTranslations()
 
 	return t
 }
-
-// Module provides an Fx provider for *Translator.
-//
-// Usage:
-//
-//	fx.New(i18n.Module, fx.Invoke(func(t *i18n.Translator) { ... }))
-var Module = fx.Provide(NewTranslator)
 
 // SetDefaultLang sets the fallback language; an empty lang resets it to LangEN.
 func (t *Translator) SetDefaultLang(lang string) {

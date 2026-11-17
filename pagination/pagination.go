@@ -16,12 +16,6 @@ type Pagination struct {
 	PrevPage   *int  `json:"prev_page"`
 }
 
-// PaginatedResponse combines a page of items with their Pagination metadata.
-type PaginatedResponse[T any] struct {
-	Items      []T        `json:"items"`
-	Pagination Pagination `json:"pagination"`
-}
-
 // Request represents standard list query parameters.
 type Request struct {
 	Page      int    `form:"page" binding:"omitempty,min=1" example:"1"`
@@ -31,7 +25,8 @@ type Request struct {
 	SortOrder string `form:"sort_order" binding:"omitempty,oneof=asc desc" example:"desc"`
 }
 
-// NewPagination computes Pagination metadata for a page of results.
+// NewPagination computes Pagination metadata for a page of results. A page past the last one keeps
+// its Page but gets PrevPage = TotalPages, so clients can step back to real data.
 //
 // Usage:
 //
@@ -60,7 +55,7 @@ func NewPagination(page, pageSize int, totalItems int64) Pagination {
 	}
 
 	if hasPrev {
-		prev := page - 1
+		prev := min(page-1, totalPages)
 		prevPage = &prev
 	}
 
@@ -101,17 +96,24 @@ func (r *Request) SetDefaults(defaultSortBy, defaultSortOrder string) {
 	}
 }
 
-// GetOffset returns the SQL OFFSET for the current page.
+// GetOffset returns the SQL OFFSET for the current page, never negative, using GetLimit as the
+// page size so a manually built Request cannot skip validation.
 func (r *Request) GetOffset() int32 {
+	if r.Page <= 1 {
+		return 0
+	}
+
+	limit := int(r.GetLimit())
+
 	// Clamped: an absurd page must give an empty page, not an overflowed (negative) OFFSET.
-	if r.PageSize > 0 && r.Page-1 > math.MaxInt32/r.PageSize {
+	if r.Page-1 > math.MaxInt32/limit {
 		return math.MaxInt32
 	}
 
-	return int32((r.Page - 1) * r.PageSize)
+	return int32((r.Page - 1) * limit)
 }
 
-// GetLimit returns the SQL LIMIT for the current page.
+// GetLimit returns the SQL LIMIT for the current page, clamped to [1, 100].
 func (r *Request) GetLimit() int32 {
-	return int32(r.PageSize)
+	return int32(min(max(r.PageSize, 1), 100))
 }

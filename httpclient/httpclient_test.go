@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/jun-develop/junkit/httpclient"
+	"go.uber.org/fx"
+	"go.uber.org/fx/fxtest"
 )
 
 func TestNewClient_AppliesDefaults(t *testing.T) {
@@ -200,9 +202,14 @@ func TestClient_RequestBodyIsReplayedAcrossRetries(t *testing.T) {
 		RetryWaitMax: 5 * time.Millisecond,
 	})
 
-	resp, err := client.Post(server.URL, "text/plain", strings.NewReader("request payload"))
+	req, err := http.NewRequest(http.MethodPut, server.URL, strings.NewReader("request payload"))
 	if err != nil {
-		t.Fatalf("Post() error = %v", err)
+		t.Fatal(err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
 	}
 
 	defer resp.Body.Close()
@@ -249,5 +256,85 @@ func TestClient_RetryStopsOnContextCancellation(t *testing.T) {
 
 	if elapsed > 2*time.Second {
 		t.Fatalf("Do() took %v, want it to stop promptly once the context was canceled (not run all 10 retries)", elapsed)
+	}
+}
+
+// opaqueReader hides strings.Reader so http.NewRequest cannot set GetBody.
+type opaqueReader struct{ io.Reader }
+
+func TestClient_RetriesOnlyReplayableRequests(t *testing.T) {
+	tests := []struct {
+		name         string
+		method       string
+		body         func() io.Reader
+		idempotency  bool
+		wantAttempts int32
+	}{
+		{"GET retried", http.MethodGet, nil, false, 3},
+		{"POST not retried", http.MethodPost, func() io.Reader { return strings.NewReader("x") }, false, 1},
+		{"POST with Idempotency-Key retried", http.MethodPost,
+			func() io.Reader { return strings.NewReader("x") }, true, 3},
+		{"PUT with non-replayable body not retried", http.MethodPut,
+			func() io.Reader { return opaqueReader{strings.NewReader("x")} }, false, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var attempts int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				atomic.AddInt32(&attempts, 1)
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}))
+			t.Cleanup(server.Close)
+
+			client := httpclient.NewClient(httpclient.Options{
+				MaxRetries:   2,
+				RetryWaitMin: time.Millisecond,
+				RetryWaitMax: 5 * time.Millisecond,
+			})
+
+			var body io.Reader
+			if tt.body != nil {
+				body = tt.body()
+			}
+
+			req, err := http.NewRequest(tt.method, server.URL, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if tt.idempotency {
+				req.Header.Set("Idempotency-Key", "k1")
+			}
+
+			getBody := req.GetBody
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("Do() error = %v", err)
+			}
+
+			resp.Body.Close()
+
+			if got := atomic.LoadInt32(&attempts); got != tt.wantAttempts {
+				t.Fatalf("attempts = %d, want %d", got, tt.wantAttempts)
+			}
+
+			if (getBody == nil) != (req.GetBody == nil) {
+				t.Fatal("RoundTrip must not modify the caller's request")
+			}
+		})
+	}
+}
+
+func TestModule_ClosesIdleConnectionsOnStop(t *testing.T) {
+	var client *http.Client
+	app := fxtest.New(t,
+		fx.Supply(httpclient.Options{}),
+		httpclient.Module,
+		fx.Populate(&client),
+	)
+	app.RequireStart().RequireStop()
+
+	if client == nil {
+		t.Fatal("Module did not provide an *http.Client")
 	}
 }

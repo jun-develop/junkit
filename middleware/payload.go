@@ -3,8 +3,10 @@ package middleware
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -14,20 +16,32 @@ import (
 
 // Gin context keys Payload populates.
 const (
-	// PayloadKey holds the request body parsed as map[string]any (JSON or form).
+	// PayloadKey caches the body parsed as map[string]any (JSON or form) by the first GetPayload.
 	PayloadKey = "_request_payload"
 
 	// PayloadRawKey holds the raw request body bytes.
 	PayloadRawKey = "_request_body_raw"
 )
 
+// defaultMaxBodySize is PayloadOptions.MaxBodySize's default.
+const defaultMaxBodySize = 1 << 20
+
 // PayloadOptions configures request body reading rules.
 type PayloadOptions struct {
-	// MaxBodySize is the maximum allowed request body size in bytes.
+	// MaxBodySize is the maximum allowed request body size in bytes. Defaults to 1 MiB.
 	MaxBodySize int64
 
 	// RouteLimits overrides MaxBodySize per RouteKey (e.g. uploads); fill it before the server starts.
 	RouteLimits map[string]int64
+}
+
+// withDefaults fills unset fields.
+func (o PayloadOptions) withDefaults() PayloadOptions {
+	if o.MaxBodySize <= 0 {
+		o.MaxBodySize = defaultMaxBodySize
+	}
+
+	return o
 }
 
 // RouteKey returns the RouteLimits key for a route: its method and its Gin route pattern.
@@ -39,12 +53,16 @@ func RouteKey(method, pattern string) string {
 	return method + " " + pattern
 }
 
-// Payload reads, limits, and caches the request body in Gin context for downstream handlers.
+// Payload limits the request body and caches it in the Gin context for downstream handlers and
+// the access log. A body over the limit gets 413, any other read failure 400. Multipart bodies are
+// limited but not buffered, since uploads would otherwise sit in memory twice.
 //
 // Usage:
 //
 //	router.Use(middleware.Payload(middleware.PayloadOptions{MaxBodySize: 2 << 20}, responder))
 func Payload(opts PayloadOptions, responder response.Responder) gin.HandlerFunc {
+	opts = opts.withDefaults()
+
 	return func(c *gin.Context) {
 		if c.Request.Body == nil || c.Request.ContentLength == 0 {
 			c.Next()
@@ -57,46 +75,69 @@ func Payload(opts PayloadOptions, responder response.Responder) gin.HandlerFunc 
 		}
 
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
+		if strings.HasPrefix(c.ContentType(), "multipart/") {
+			c.Next()
+			return
+		}
 
 		bodyBytes, err := io.ReadAll(c.Request.Body)
 		if err != nil {
-			responder.Send(c, http.StatusRequestEntityTooLarge, "request_body_too_large")
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				responder.Send(c, http.StatusRequestEntityTooLarge, "request_body_too_large")
+			} else {
+				responder.Send(c, http.StatusBadRequest, "invalid_request")
+			}
+
 			c.Abort()
 
 			return
 		}
 
-		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		c.Set(PayloadRawKey, bodyBytes)
-
-		if payload := parsePayload(c, bodyBytes); payload != nil {
-			c.Set(PayloadKey, payload)
-		}
-
 		c.Next()
 	}
 }
 
-// parsePayload parses JSON or form-urlencoded request body into a map.
-func parsePayload(c *gin.Context, bodyBytes []byte) map[string]any {
-	contentType := c.GetHeader("Content-Type")
+// GetPayload returns the body cached by Payload parsed as a map (JSON objects and
+// form-urlencoded bodies), or nil. It parses on the first call and caches the result.
+func GetPayload(c *gin.Context) map[string]any {
+	if val, ok := c.Get(PayloadKey); ok {
+		payload, _ := val.(map[string]any)
+		return payload
+	}
 
-	if strings.Contains(contentType, "application/json") {
-		var payload map[string]any
-		if json.Unmarshal(bodyBytes, &payload) == nil {
-			return payload
-		}
-
+	raw, ok := c.Get(PayloadRawKey)
+	if !ok {
 		return nil
 	}
 
-	if strings.Contains(contentType, "application/x-www-form-urlencoded") {
-		if err := c.Request.ParseForm(); err != nil {
+	bodyBytes, _ := raw.([]byte)
+	payload := parsePayload(c.ContentType(), bodyBytes)
+	c.Set(PayloadKey, payload)
+
+	return payload
+}
+
+// parsePayload parses a JSON or form-urlencoded body into a map, or returns nil.
+func parsePayload(contentType string, bodyBytes []byte) map[string]any {
+	switch contentType {
+	case "application/json":
+		var payload map[string]any
+		if json.Unmarshal(bodyBytes, &payload) != nil {
 			return nil
 		}
 
-		payload := make(map[string]any, len(c.Request.PostForm))
-		for k, v := range c.Request.PostForm {
+		return payload
+	case "application/x-www-form-urlencoded":
+		form, err := url.ParseQuery(string(bodyBytes))
+		if err != nil {
+			return nil
+		}
+
+		payload := make(map[string]any, len(form))
+		for k, v := range form {
 			if len(v) == 1 {
 				payload[k] = v[0]
 			} else {
@@ -105,17 +146,6 @@ func parsePayload(c *gin.Context, bodyBytes []byte) map[string]any {
 		}
 
 		return payload
-	}
-
-	return nil
-}
-
-// GetPayload returns the payload cached by Payload, or nil if none was cached.
-func GetPayload(c *gin.Context) map[string]any {
-	if val, ok := c.Get(PayloadKey); ok {
-		if payload, ok := val.(map[string]any); ok {
-			return payload
-		}
 	}
 
 	return nil

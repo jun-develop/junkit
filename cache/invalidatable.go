@@ -26,13 +26,13 @@ type Invalidatable[T any] struct {
 	now     func() time.Time
 }
 
-// NewInvalidatable creates an Invalidatable on opts' backend; ttl <= 0 disables caching.
+// NewInvalidatable creates an Invalidatable on s; ttl <= 0 disables caching.
 //
 // Usage:
 //
-//	sessions := cache.NewInvalidatable[*Session](opts, 3*time.Minute)
-func NewInvalidatable[T any](opts Options, ttl time.Duration) *Invalidatable[T] {
-	return &Invalidatable[T]{entries: New[*stamped[T]](opts), markers: New[int64](opts), ttl: ttl, now: time.Now}
+//	sessions := cache.NewInvalidatable[*Session](s, 3*time.Minute)
+func NewInvalidatable[T any](s *Store, ttl time.Duration) *Invalidatable[T] {
+	return &Invalidatable[T]{entries: New[*stamped[T]](s), markers: New[int64](s), ttl: ttl, now: time.Now}
 }
 
 // GetOrLoad returns key's cached value unless one of markers(value) was invalidated after it was
@@ -60,6 +60,7 @@ func (c *Invalidatable[T]) GetOrLoad(ctx context.Context, key string, markers fu
 		return value, false, err
 	}
 
+	// Best-effort: the value is correct either way; a failed store only costs a reload.
 	_ = c.entries.Set(ctx, key, &stamped[T]{Value: value, LoadedAt: loadedAt}, c.ttl)
 
 	return value, false, nil
@@ -85,11 +86,13 @@ func (c *Invalidatable[T]) Invalidate(ctx context.Context, marker string) error 
 	return c.markers.Set(ctx, marker, c.now().UnixNano(), 2*c.ttl)
 }
 
-// stale reports whether entry was loaded before one of markers was invalidated.
+// stale reports whether entry was loaded before one of markers was invalidated. A marker that
+// cannot be read counts as invalidated, so a backend error cannot serve revoked data.
 func (c *Invalidatable[T]) stale(ctx context.Context, entry *stamped[T], markers []string) bool {
 	loadedAt := entry.LoadedAt.UnixNano()
 	for _, m := range markers {
-		if at, ok := c.markers.Get(ctx, m); ok && at+clockSkewMargin.Nanoseconds() >= loadedAt {
+		at, ok, err := c.markers.Lookup(ctx, m)
+		if err != nil || (ok && at+clockSkewMargin.Nanoseconds() >= loadedAt) {
 			return true
 		}
 	}

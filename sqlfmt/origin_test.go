@@ -1,5 +1,5 @@
-// Package sqlfmt_test is an external test package because Origin skips frames of
-// package sqlfmt itself.
+// Package sqlfmt_test is an external test package because Origin skips frames of package sqlfmt
+// itself.
 package sqlfmt_test
 
 import (

@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-func TestFormatValue(t *testing.T) {
+func TestFormatValue_RendersLiterals(t *testing.T) {
 	sampleTime := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
 	sampleUUID := uuid.MustParse("8040c036-b0a5-4178-8015-c4c4c6b37164")
 
@@ -216,7 +216,7 @@ func TestFormatValue(t *testing.T) {
 	}
 }
 
-func TestBind(t *testing.T) {
+func TestBind_ReplacesPlaceholders(t *testing.T) {
 	tests := []struct {
 		name string
 		sql  string
@@ -265,6 +265,36 @@ func TestBind(t *testing.T) {
 			args: []any{"x"},
 			want: "SELECT price_tag FROM t WHERE note = 'costs $ a lot'",
 		},
+		{
+			name: "a $N inside a string literal is not a placeholder",
+			sql:  "SELECT 'costs $1', 'it''s $2' FROM t WHERE id = $1",
+			args: []any{7, 8},
+			want: "SELECT 'costs $1', 'it''s $2' FROM t WHERE id = 7",
+		},
+		{
+			name: "a $N inside a $$ body is not a placeholder",
+			sql:  "DO $$ BEGIN PERFORM $1; END $$; SELECT $1",
+			args: []any{7},
+			want: "DO $$ BEGIN PERFORM $1; END $$; SELECT 7",
+		},
+		{
+			name: "a $N inside a tagged dollar-quoted body is not a placeholder",
+			sql:  "SELECT $fn$ x = $1 $$ $fn$, $1",
+			args: []any{7},
+			want: "SELECT $fn$ x = $1 $$ $fn$, 7",
+		},
+		{
+			name: "an unterminated string literal is copied to the end",
+			sql:  "SELECT $1, 'oops $1",
+			args: []any{7},
+			want: "SELECT 7, 'oops $1",
+		},
+		{
+			name: "a placeholder right after a string literal is replaced",
+			sql:  "SELECT 'a'||$1",
+			args: []any{"b"},
+			want: "SELECT 'a'||'b'",
+		},
 	}
 
 	for _, tt := range tests {
@@ -276,7 +306,7 @@ func TestBind(t *testing.T) {
 	}
 }
 
-func TestGuessName(t *testing.T) {
+func TestGuessName_UsesLeadingKeyword(t *testing.T) {
 	tests := []struct {
 		name string
 		sql  string
@@ -301,7 +331,7 @@ func TestGuessName(t *testing.T) {
 	}
 }
 
-func TestParse(t *testing.T) {
+func TestParse_ExtractsAnnotation(t *testing.T) {
 	tests := []struct {
 		name string
 		sql  string
@@ -348,7 +378,7 @@ func TestParse_CacheIsBounded(t *testing.T) {
 	}
 }
 
-func TestBindQuestion(t *testing.T) {
+func TestBindQuestion_ReplacesPlaceholders(t *testing.T) {
 	tests := []struct {
 		name string
 		sql  string

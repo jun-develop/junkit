@@ -3,6 +3,7 @@ package upload
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -10,9 +11,6 @@ import (
 	"slices"
 	"strings"
 )
-
-// ErrInvalidFile is returned when an upload breaks its Rule.
-var ErrInvalidFile = errors.New("upload: invalid file")
 
 // Rule is what an uploaded file must satisfy.
 type Rule struct {
@@ -37,6 +35,7 @@ func Image(maxSize int64) Rule {
 
 // Open checks fh against rule and opens it; the caller closes the file. The content is sniffed as
 // well, so a file whose extension is allowed but whose bytes are something else is refused.
+// A rule violation returns ErrInvalidFile; failing to open the upload returns a wrapped I/O error.
 func Open(fh *multipart.FileHeader, rule Rule) (multipart.File, error) {
 	if fh.Size > rule.MaxSize || !slices.Contains(rule.Extensions, Extension(fh.Filename)) {
 		return nil, ErrInvalidFile
@@ -44,10 +43,11 @@ func Open(fh *multipart.FileHeader, rule Rule) (multipart.File, error) {
 
 	file, err := fh.Open()
 	if err != nil {
-		return nil, ErrInvalidFile
+		return nil, fmt.Errorf("upload: open: %w", err)
 	}
 
 	if !HasType(file, rule.Types...) {
+		// Read-only close; the rejection is the error worth returning.
 		_ = file.Close()
 		return nil, ErrInvalidFile
 	}

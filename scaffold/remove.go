@@ -1,13 +1,14 @@
 package scaffold
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/jun-develop/junkit/console"
 )
 
-// RemoveConfig configures a Remove call — the inverse of GenerateConfig.
-type RemoveConfig struct {
+// RemoveOptions configures a Remove call — the inverse of GenerateOptions.
+type RemoveOptions struct {
 	// Dirs are whole directories removed via os.RemoveAll (e.g. the feature
 	// directory itself).
 	Dirs []string
@@ -16,7 +17,7 @@ type RemoveConfig struct {
 	// hand-written sqlc file or queries file living outside Dirs).
 	ExtraFiles []string
 
-	// FxFile, ImportPath, and ModuleLine mirror GenerateConfig's fields and
+	// FxFile, ImportPath, and ModuleLine mirror GenerateOptions's fields and
 	// undo the registration Generate performed.
 	FxFile     string
 	ImportPath string
@@ -25,13 +26,13 @@ type RemoveConfig struct {
 
 // Remove undoes a prior Generate: it unregisters the module from Fx, then deletes the
 // extra files and feature directories.
-func Remove(cfg RemoveConfig) error {
+func Remove(cfg RemoveOptions) error {
 	if err := removeModuleLine(cfg.FxFile, cfg.ModuleLine); err != nil {
-		return console.NewError("remove module line: %w", err)
+		return fmt.Errorf("scaffold: remove module line: %w", err)
 	}
 
 	if err := removeImportLine(cfg.FxFile, cfg.ImportPath); err != nil {
-		return console.NewError("remove import: %w", err)
+		return fmt.Errorf("scaffold: remove import: %w", err)
 	}
 
 	if err := gofmtPaths([]string{cfg.FxFile}); err != nil {
@@ -46,7 +47,7 @@ func Remove(cfg RemoveConfig) error {
 				continue
 			}
 
-			return console.NewError("remove %s: %w", f, err)
+			return fmt.Errorf("scaffold: remove %s: %w", f, err)
 		}
 
 		console.Successf("Removed %s", f)
@@ -59,7 +60,7 @@ func Remove(cfg RemoveConfig) error {
 		}
 
 		if err := os.RemoveAll(d); err != nil {
-			return console.NewError("remove %s: %w", d, err)
+			return fmt.Errorf("scaffold: remove %s: %w", d, err)
 		}
 
 		console.Successf("Removed %s", d)

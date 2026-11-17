@@ -20,30 +20,53 @@ import (
 
 // Options configures the Validator instance.
 type Options struct {
-	// Language is the default locale used to resolve validation message keys, e.g. "en".
-	Language string
+	// BlocklistPath is a newline-delimited file of disposable email domains for the
+	// email_advanced rule. Empty uses the built-in seed list; the file is only read, never written.
+	BlocklistPath string
+
+	// MXTimeout bounds the DNS lookups the email_advanced rule makes per domain. Defaults to 3s.
+	MXTimeout time.Duration
+}
+
+// withDefaults returns a copy of o with zero or invalid fields replaced by defaults.
+func (o Options) withDefaults() Options {
+	if o.MXTimeout <= 0 {
+		o.MXTimeout = 3 * time.Second
+	}
+
+	return o
 }
 
 // Validator translates binding and validation errors into localized, field-keyed messages.
+// Messages use the translator's default language.
 type Validator struct {
 	translator *i18n.Translator
-	lang       string
+	email      *emailChecker
 }
 
-// NewValidator creates a Validator and registers the custom rules on gin's binding validator.
+// NewValidator creates a Validator and registers the custom rules on gin's binding engine
+// (binding.Validator). That engine is process-global, which is how gin's ShouldBind* sees the
+// rules, so the most recently created Validator's rules are the ones gin runs.
 //
 // Usage:
 //
-//	v := validation.NewValidator(validation.Options{Language: "en"}, translator)
-func NewValidator(opts Options, translator *i18n.Translator) *Validator {
-	if v, ok := binding.Validator.Engine().(*validator.Validate); ok {
-		RegisterCustomValidation(v)
+//	v, err := validation.NewValidator(validation.Options{}, translator)
+func NewValidator(opts Options, translator *i18n.Translator) (*Validator, error) {
+	opts = opts.withDefaults()
+
+	email, err := newEmailChecker(opts)
+	if err != nil {
+		return nil, err
 	}
 
-	return &Validator{
-		translator: translator,
-		lang:       opts.Language,
+	v := &Validator{translator: translator, email: email}
+	if engine, ok := binding.Validator.Engine().(*validator.Validate); ok {
+		if err := v.RegisterCustomValidation(engine); err != nil {
+			return nil, err
+		}
 	}
+
+	return v, nil
 }
 
 // GetValidationErrors converts a binding error into a localized map of field errors, or a single
@@ -199,7 +222,7 @@ func (v *Validator) translate(key, fallback string, args ...any) string {
 		return fallback
 	}
 
-	msg := v.translator.GetMessage(key, v.lang, args...)
+	msg := v.translator.GetMessage(key, "", args...)
 	if msg == key && fallback != "" {
 		return fallback
 	}

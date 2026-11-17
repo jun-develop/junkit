@@ -2,15 +2,13 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
-
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
 )
 
 // newTestClient returns a client whose botPrefix points at a local httptest.Server.
@@ -28,7 +26,6 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) (*client, *http.Serve
 		httpClient: server.Client(),
 		botPrefix:  server.URL + "/bottest-token",
 		token:      "test-token",
-		logger:     zaptest.NewLogger(t),
 	}, mux
 }
 
@@ -131,7 +128,7 @@ func TestClient_SendDocument_SkipsWithNilContent(t *testing.T) {
 }
 
 func TestNewClient_NilHTTPClientDefaults(t *testing.T) {
-	c := NewClient(Options{Token: "abc"}, nil, zap.NewNop())
+	c := NewClient(Options{Token: "abc"}, nil)
 	impl, ok := c.(*client)
 	if !ok {
 		t.Fatalf("NewClient() returned %T, want *client", c)
@@ -162,4 +159,39 @@ func TestClient_SendDocument_BuildRequestErrorReleasesWriter(t *testing.T) {
 
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func TestClient_TransportErrorHidesToken(t *testing.T) {
+	c := NewClient(Options{Token: "secret-bot-token"}, &http.Client{Transport: failingTransport{}})
+
+	tests := []struct {
+		name string
+		send func() error
+	}{
+		{"message", func() error { return c.SendMessage(context.Background(), "123", "hi") }},
+		{"document", func() error {
+			return c.SendDocument(context.Background(), "123", strings.NewReader("doc"), "a.txt", "")
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.send()
+			if err == nil {
+				t.Fatal("error = nil, want the transport error")
+			}
+
+			if strings.Contains(err.Error(), "secret-bot-token") || !strings.HasPrefix(err.Error(), "telegram: ") {
+				t.Fatalf("error = %q, want a telegram: error without the token", err)
+			}
+		})
+	}
+}
+
+// failingTransport fails every request.
+type failingTransport struct{}
+
+// RoundTrip implements http.RoundTripper.
+func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("connection refused")
 }

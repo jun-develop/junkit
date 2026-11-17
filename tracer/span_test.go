@@ -8,10 +8,13 @@ import (
 	"github.com/jun-develop/junkit/tracer"
 )
 
+// TestSpan_NoOpWithoutDebugger checks Span is safe to use without a Debugger.
 func TestSpan_NoOpWithoutDebugger(t *testing.T) {
-	tracer.Span(context.Background(), "no debugger")() // must not panic
+	// Must not panic.
+	tracer.Span(context.Background(), "no debugger")()
 }
 
+// TestSpan_RecordsOnStop checks a span entry is recorded with its duration when stopped.
 func TestSpan_RecordsOnStop(t *testing.T) {
 	ctx, d := newCtx()
 
@@ -38,6 +41,7 @@ func TestSpan_RecordsOnStop(t *testing.T) {
 	}
 }
 
+// TestSpan_NestedSpansKeepTheirStartOffsets checks nested spans keep their own start offsets.
 func TestSpan_NestedSpansKeepTheirStartOffsets(t *testing.T) {
 	ctx, d := newCtx()
 
@@ -59,6 +63,7 @@ func TestSpan_NestedSpansKeepTheirStartOffsets(t *testing.T) {
 	}
 }
 
+// TestMeasure checks Measure runs fn and records it as a span.
 func TestMeasure(t *testing.T) {
 	t.Run("records a span around fn", func(t *testing.T) {
 		ctx, d := newCtx()

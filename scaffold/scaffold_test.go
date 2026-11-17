@@ -158,7 +158,7 @@ func GetFxOptions() []fx.Option {
 	}
 
 	data := scaffold.NewFeatureData("product", "jungo", "")
-	cfg := scaffold.GenerateConfig{
+	cfg := scaffold.GenerateOptions{
 		Data: data,
 		Files: []scaffold.File{
 			{Path: filepath.Join(dir, "domain", "product.go"), Template: "package domain\n\ntype {{.Pascal}} struct{}\n"},
@@ -214,7 +214,7 @@ func TestGenerate_RefusesToOverwriteExistingFile(t *testing.T) {
 		t.Fatalf("test setup: %v", err)
 	}
 
-	cfg := scaffold.GenerateConfig{
+	cfg := scaffold.GenerateOptions{
 		Data:  scaffold.NewFeatureData("product", "jungo", ""),
 		Files: []scaffold.File{{Path: existing, Template: "package x\n// overwritten\n"}},
 	}
@@ -233,7 +233,7 @@ func TestGenerate_RenderErrorWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	first := filepath.Join(dir, "a", "first.go")
 
-	cfg := scaffold.GenerateConfig{
+	cfg := scaffold.GenerateOptions{
 		Data: scaffold.NewFeatureData("product", "jungo", ""),
 		Files: []scaffold.File{
 			{Path: first, Template: "package a\n"},
@@ -279,7 +279,7 @@ func TestRemove(t *testing.T) {
 		t.Fatalf("test setup: %v", err)
 	}
 
-	cfg := scaffold.RemoveConfig{
+	cfg := scaffold.RemoveOptions{
 		Dirs:       []string{featureDir},
 		ExtraFiles: []string{extraFile},
 		FxFile:     fxFile,
@@ -312,7 +312,7 @@ func TestRemove_MissingExtraFileIsNotAnError(t *testing.T) {
 		t.Fatalf("test setup: %v", err)
 	}
 
-	cfg := scaffold.RemoveConfig{
+	cfg := scaffold.RemoveOptions{
 		ExtraFiles: []string{filepath.Join(dir, "does-not-exist.sql")},
 		FxFile:     fxFile,
 		ImportPath: "jungo/internal/features/product",

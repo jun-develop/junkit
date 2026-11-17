@@ -7,6 +7,7 @@ import (
 	"github.com/jun-develop/junkit/security"
 )
 
+// TestGenerateToken checks token encoding, size and uniqueness.
 func TestGenerateToken(t *testing.T) {
 	seen := make(map[string]bool, 1000)
 	for range 1000 {

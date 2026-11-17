@@ -11,9 +11,11 @@ func TestEnsureUpper(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := ensureUpper(tt.in); got != tt.want {
-			t.Errorf("ensureUpper(%q) = %q, want %q", tt.in, got, tt.want)
-		}
+		t.Run(tt.in, func(t *testing.T) {
+			if got := ensureUpper(tt.in); got != tt.want {
+				t.Errorf("ensureUpper(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -25,8 +27,10 @@ func TestEnsureLower(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := ensureLower(tt.in); got != tt.want {
-			t.Errorf("ensureLower(%q) = %q, want %q", tt.in, got, tt.want)
-		}
+		t.Run(tt.in, func(t *testing.T) {
+			if got := ensureLower(tt.in); got != tt.want {
+				t.Errorf("ensureLower(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }

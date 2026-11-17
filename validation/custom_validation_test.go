@@ -1,6 +1,7 @@
 package validation_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,16 +11,18 @@ import (
 	"github.com/jun-develop/junkit/validation"
 )
 
-// newTestValidator returns a validator.Validate instance with custom rules registered.
+// newTestValidator returns a validator.Validate with the custom rules registered.
 func newTestValidator(t *testing.T) *validator.Validate {
 	t.Helper()
-	v := validator.New()
-	validation.RegisterCustomValidation(v)
+	engine := validator.New()
+	if err := newValidator(t, validation.Options{}).RegisterCustomValidation(engine); err != nil {
+		t.Fatalf("RegisterCustomValidation() error = %v", err)
+	}
 
-	return v
+	return engine
 }
 
-func TestPasswordStrongTag(t *testing.T) {
+func TestValidator_PasswordStrongTag(t *testing.T) {
 	v := newTestValidator(t)
 
 	type form struct {
@@ -49,7 +52,7 @@ func TestPasswordStrongTag(t *testing.T) {
 	}
 }
 
-func TestSlugTag(t *testing.T) {
+func TestValidator_SlugTag(t *testing.T) {
 	v := newTestValidator(t)
 
 	type form struct {
@@ -78,7 +81,7 @@ func TestSlugTag(t *testing.T) {
 	}
 }
 
-func TestSearchTag(t *testing.T) {
+func TestValidator_SearchTag(t *testing.T) {
 	v := newTestValidator(t)
 
 	type form struct {
@@ -104,7 +107,7 @@ func TestSearchTag(t *testing.T) {
 	}
 }
 
-func TestMinIntMaxIntTags(t *testing.T) {
+func TestValidator_MinIntMaxIntTags(t *testing.T) {
 	v := newTestValidator(t)
 
 	type form struct {
@@ -133,7 +136,7 @@ func TestMinIntMaxIntTags(t *testing.T) {
 	}
 }
 
-func TestMinIntMaxIntTags_NonIntFields(t *testing.T) {
+func TestValidator_MinIntMaxIntTagsNonIntFields(t *testing.T) {
 	v := newTestValidator(t)
 
 	type form struct {
@@ -141,20 +144,26 @@ func TestMinIntMaxIntTags_NonIntFields(t *testing.T) {
 		Name  string `validate:"omitempty,min_int=1"`
 	}
 
-	if err := v.Struct(form{Count: 5}); err != nil {
-		t.Fatalf("uint within range: validate error = %v, want nil", err)
+	tests := []struct {
+		name   string
+		form   form
+		wantOK bool
+	}{
+		{name: "uint within range", form: form{Count: 5}, wantOK: true},
+		{name: "uint above the maximum", form: form{Count: 11}, wantOK: false},
+		{name: "string field is rejected instead of panicking", form: form{Count: 5, Name: "x"}, wantOK: false},
 	}
 
-	if err := v.Struct(form{Count: 11}); err == nil {
-		t.Fatal("uint above the maximum: validate error = nil, want an error")
-	}
-
-	if err := v.Struct(form{Count: 5, Name: "x"}); err == nil {
-		t.Fatal("string field: validate error = nil, want an error instead of a panic")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := v.Struct(tt.form); (err == nil) != tt.wantOK {
+				t.Fatalf("validate error = %v, want ok=%v", err, tt.wantOK)
+			}
+		})
 	}
 }
 
-func TestFileExtTag(t *testing.T) {
+func TestValidator_FileExtTag(t *testing.T) {
 	v := newTestValidator(t)
 
 	type form struct {
@@ -182,7 +191,7 @@ func TestFileExtTag(t *testing.T) {
 	}
 }
 
-func TestAlphanumDashTag(t *testing.T) {
+func TestValidator_AlphanumDashTag(t *testing.T) {
 	v := newTestValidator(t)
 
 	type form struct {
@@ -208,7 +217,7 @@ func TestAlphanumDashTag(t *testing.T) {
 	}
 }
 
-func TestDateTags(t *testing.T) {
+func TestValidator_DateTags(t *testing.T) {
 	v := newTestValidator(t)
 
 	type dateForm struct {
@@ -218,32 +227,27 @@ func TestDateTags(t *testing.T) {
 		Date string `validate:"date_past"`
 	}
 
-	t.Run("date accepts YYYY-MM-DD", func(t *testing.T) {
-		if err := v.Struct(dateForm{Date: "2026-01-15"}); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
+	tests := []struct {
+		name   string
+		form   any
+		wantOK bool
+	}{
+		{name: "date accepts YYYY-MM-DD", form: dateForm{Date: "2026-01-15"}, wantOK: true},
+		{name: "date rejects other formats", form: dateForm{Date: "15/01/2026"}, wantOK: false},
+		{name: "date_past accepts a date before now", form: datePastForm{Date: "2020-01-01"}, wantOK: true},
+		{name: "date_past rejects a future date", form: datePastForm{Date: "2999-01-01"}, wantOK: false},
+	}
 
-	t.Run("date rejects other formats", func(t *testing.T) {
-		if err := v.Struct(dateForm{Date: "15/01/2026"}); err == nil {
-			t.Fatal("expected a validation error")
-		}
-	})
-
-	t.Run("date_past accepts a date before now", func(t *testing.T) {
-		if err := v.Struct(datePastForm{Date: "2020-01-01"}); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("date_past rejects a future date", func(t *testing.T) {
-		if err := v.Struct(datePastForm{Date: "2999-01-01"}); err == nil {
-			t.Fatal("expected a validation error")
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := v.Struct(tt.form); (err == nil) != tt.wantOK {
+				t.Fatalf("validate error = %v, want ok=%v", err, tt.wantOK)
+			}
+		})
+	}
 }
 
-func TestPhoneAdvancedTag(t *testing.T) {
+func TestValidator_PhoneAdvancedTag(t *testing.T) {
 	v := newTestValidator(t)
 
 	type form struct {
@@ -271,8 +275,8 @@ func TestPhoneAdvancedTag(t *testing.T) {
 	}
 }
 
-// TestEmailAdvancedTag covers format and disposable-domain checks without network I/O.
-func TestEmailAdvancedTag(t *testing.T) {
+// TestValidator_EmailAdvancedTag covers format and disposable-domain checks without network I/O.
+func TestValidator_EmailAdvancedTag(t *testing.T) {
 	v := newTestValidator(t)
 
 	type form struct {
@@ -298,51 +302,35 @@ func TestEmailAdvancedTag(t *testing.T) {
 	}
 }
 
-func TestIsDisposableEmail(t *testing.T) {
-	if !validation.IsDisposableEmail("mailinator.com") {
-		t.Error("mailinator.com should be in the hardcoded fallback list")
-	}
-
-	if !validation.IsDisposableEmail("MAILINATOR.COM") {
-		t.Error("domain matching should be case-insensitive")
-	}
-
-	if validation.IsDisposableEmail("gmail.com") {
-		t.Error("gmail.com should not be considered disposable")
-	}
-}
-
-func TestLoadDisposableEmailsFromFile(t *testing.T) {
+func TestNewValidator_BlocklistPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blocklist.conf")
-
-	// Loading an empty file resets the package-wide blocklist for other tests.
-	t.Cleanup(func() {
-		empty := filepath.Join(dir, "empty.conf")
-		_ = os.WriteFile(empty, nil, 0o644)
-		_ = validation.LoadDisposableEmailsFromFile(empty)
-	})
-
-	content := "throwaway-test-domain.example\nANOTHER-TEST-DOMAIN.example\n\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("failed to write test blocklist: %v", err)
+	if err := os.WriteFile(path, []byte("throwaway.example\n\nANOTHER.example\n"), 0o644); err != nil {
+		t.Fatalf("write blocklist: %v", err)
 	}
 
-	if err := validation.LoadDisposableEmailsFromFile(path); err != nil {
-		t.Fatalf("LoadDisposableEmailsFromFile() error = %v", err)
+	type form struct {
+		Email string `validate:"email_advanced"`
 	}
 
-	if !validation.IsDisposableEmail("throwaway-test-domain.example") {
-		t.Error("domain loaded from the blocklist file should be reported as disposable")
+	engine := validator.New()
+	if err := newValidator(t, validation.Options{BlocklistPath: path}).RegisterCustomValidation(engine); err != nil {
+		t.Fatalf("RegisterCustomValidation() error = %v", err)
 	}
 
-	if !validation.IsDisposableEmail("another-test-domain.example") {
-		t.Error("domain matching against the loaded blocklist should be case-insensitive")
+	// Listed domains are rejected before any DNS lookup, so these stay offline.
+	for _, email := range []string{"a@throwaway.example", "a@another.example"} {
+		t.Run(email, func(t *testing.T) {
+			if err := engine.Struct(form{Email: email}); err == nil {
+				t.Fatalf("email %q: validate error = nil, want the blocklisted domain rejected", email)
+			}
+		})
 	}
 
-	t.Run("missing file returns an error", func(t *testing.T) {
-		if err := validation.LoadDisposableEmailsFromFile(filepath.Join(dir, "does-not-exist.conf")); err == nil {
-			t.Fatal("expected an error for a nonexistent file")
+	t.Run("missing file", func(t *testing.T) {
+		_, err := validation.NewValidator(validation.Options{BlocklistPath: filepath.Join(dir, "missing.conf")}, nil)
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("NewValidator() error = %v, want os.ErrNotExist", err)
 		}
 	})
 }

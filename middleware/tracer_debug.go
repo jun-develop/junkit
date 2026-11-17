@@ -78,9 +78,9 @@ func renderTracerDashboard(c *gin.Context, bw *bodyWriter, start time.Time) {
 			panic(r)
 		}
 
-		tracer.C(c.Request.Context(), fmt.Sprintf("⏸ Stopped by tracer.Stop() after %v", time.Since(start)))
+		tracer.Comment(c.Request.Context(), fmt.Sprintf("⏸ Stopped by tracer.Stop() after %v", time.Since(start)))
 	} else {
-		tracer.C(c.Request.Context(), fmt.Sprintf("Request processed in %v", time.Since(start)))
+		tracer.Comment(c.Request.Context(), fmt.Sprintf("Request processed in %v", time.Since(start)))
 		tracer.HTTPInfo(c, c.Request)
 	}
 

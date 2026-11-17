@@ -3,6 +3,7 @@ package mailer
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,11 +20,12 @@ import (
 	"go.uber.org/zap/zaptest"
 )
 
+// validMessage returns a Message that passes prepare.
 func validMessage() Message {
 	return Message{
 		To:      []string{"Bob <bob@example.com>"},
 		Bcc:     []string{"audit@example.com"},
-		Subject: "Hello Junkit",
+		Subject: "Xin chào",
 		HTML:    "<p>Hi</p>",
 		Text:    "Hi",
 	}
@@ -37,6 +39,12 @@ func TestPrepare_Validation(t *testing.T) {
 		"empty body":        func(m *Message) { m.HTML, m.Text = "", "" },
 		"bad attachment":    func(m *Message) { m.Attachments = []Attachment{{Filename: ""}} },
 		"bad from override": func(m *Message) { m.From = "nope" },
+		"content type injection": func(m *Message) {
+			m.Attachments = []Attachment{{Filename: "a.txt", ContentType: "text/plain\r\nBcc: evil@example.com"}}
+		},
+		"bad content type": func(m *Message) {
+			m.Attachments = []Attachment{{Filename: "a.txt", ContentType: "text/"}}
+		},
 	}
 
 	for name, mutate := range cases {
@@ -109,7 +117,8 @@ func TestBuildMIME_AlternativeWithAttachment(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		b, _ := io.ReadAll(p) // multipart.Reader decodes quoted-printable
+		// multipart.Reader decodes quoted-printable.
+		b, _ := io.ReadAll(p)
 		texts = append(texts, string(b))
 	}
 
@@ -166,7 +175,8 @@ func TestBrevoSender_APIError(t *testing.T) {
 	}
 }
 
-// fakeSMTP is a minimal SMTP server (no TLS, no auth) recording one transaction.
+// fakeSMTP is a minimal plaintext SMTP server recording one transaction. It never offers
+// STARTTLS and accepts any AUTH it advertises.
 func fakeSMTP(t *testing.T) (port int, result <-chan []string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -199,7 +209,10 @@ func fakeSMTP(t *testing.T) (port int, result <-chan []string) {
 			log = append(log, line)
 			switch cmd := strings.ToUpper(strings.SplitN(line, " ", 2)[0]); cmd {
 			case "EHLO", "HELO":
-				reply("250 fake")
+				reply("250-fake")
+				reply("250 AUTH PLAIN")
+			case "AUTH":
+				reply("235 ok")
 			case "DATA":
 				reply("354 go")
 				for {
@@ -230,21 +243,55 @@ func fakeSMTP(t *testing.T) (port int, result <-chan []string) {
 }
 
 func TestSMTPSender_Send(t *testing.T) {
-	port, result := fakeSMTP(t)
-	s, err := newSMTPSender("App <app@example.com>", SMTPOptions{Host: "127.0.0.1", Port: port, Timeout: 5 * time.Second})
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name     string
+		opts     SMTPOptions
+		wantErr  error
+		wantLogs []string
+	}{
+		{
+			name: "plaintext allowed",
+			opts: SMTPOptions{AllowPlaintext: true},
+			wantLogs: []string{"MAIL FROM:<app@example.com>", "RCPT TO:<bob@example.com>",
+				"RCPT TO:<audit@example.com>", "Subject: =?utf-8?q?Xin_ch=C3=A0o?="},
+		},
+		{
+			name: "auth",
+			opts: SMTPOptions{AllowPlaintext: true, Username: "user", Password: "pass"},
+			wantLogs: []string{"AUTH PLAIN " +
+				base64.StdEncoding.EncodeToString([]byte("\x00user\x00pass"))},
+		},
+		{
+			name:    "starttls required",
+			opts:    SMTPOptions{},
+			wantErr: ErrTLSRequired,
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			port, result := fakeSMTP(t)
+			tt.opts.Host, tt.opts.Port, tt.opts.Timeout = "127.0.0.1", port, 5*time.Second
+			s, err := newSMTPSender("App <app@example.com>", tt.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	if err := s.Send(context.Background(), validMessage()); err != nil {
-		t.Fatalf("Send() error = %v", err)
-	}
+			err = s.Send(context.Background(), validMessage())
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Send() error = %v, want %v", err, tt.wantErr)
+			}
 
-	log := strings.Join(<-result, "\n")
-	for _, want := range []string{"MAIL FROM:<app@example.com>", "RCPT TO:<bob@example.com>", "RCPT TO:<audit@example.com>", "Subject: =?utf-8?q?Xin_ch=C3=A0o?="} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("transcript missing %q:\n%s", want, log)
-		}
+			if tt.wantErr != nil {
+				return
+			}
+
+			log := strings.Join(<-result, "\n")
+			for _, want := range tt.wantLogs {
+				if !strings.Contains(log, want) {
+					t.Fatalf("transcript missing %q:\n%s", want, log)
+				}
+			}
+		})
 	}
 }
 
@@ -270,5 +317,4 @@ func TestNew(t *testing.T) {
 	if err := s.Send(context.Background(), validMessage()); err != nil {
 		t.Fatalf("log driver Send() error = %v", err)
 	}
-
 }

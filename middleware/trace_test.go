@@ -30,28 +30,33 @@ func TestTrace_GeneratesATraceIDWhenNoneProvided(t *testing.T) {
 	if got := logger.GetTraceID(c.Request.Context()); got != traceID {
 		t.Fatalf("logger.GetTraceID(request context) = %q, want it to match the response header %q", got, traceID)
 	}
-
-	ctxVal, _ := c.Get(response.TraceIDContextKey)
-	if ctxVal != traceID {
-		t.Fatalf(`gin context %q = %v, want it to match %q`, response.TraceIDContextKey, ctxVal, traceID)
-	}
 }
 
-func TestTrace_PropagatesAnIncomingTraceID(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-	c.Request.Header.Set(middleware.HeaderTraceID, "incoming-trace-id")
-
-	middleware.Trace(middleware.TraceOptions{})(c)
-
-	if got := w.Header().Get(middleware.HeaderTraceID); got != "incoming-trace-id" {
-		t.Fatalf("response trace ID = %q, want the incoming header value %q", got, "incoming-trace-id")
+func TestTrace_IncomingTraceIDOnlyWhenTrusted(t *testing.T) {
+	tests := []struct {
+		name  string
+		trust bool
+		want  bool
+	}{
+		{"trusted header is reused", true, true},
+		{"untrusted header is replaced", false, false},
 	}
 
-	if got := logger.GetTraceID(c.Request.Context()); got != "incoming-trace-id" {
-		t.Fatalf("logger.GetTraceID() = %q, want %q", got, "incoming-trace-id")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+			c.Request.Header.Set(middleware.HeaderTraceID, "incoming-trace-id")
+
+			middleware.Trace(middleware.TraceOptions{TrustHeader: tt.trust})(c)
+
+			got := w.Header().Get(middleware.HeaderTraceID)
+			if (got == "incoming-trace-id") != tt.want || logger.GetTraceID(c.Request.Context()) != got {
+				t.Fatalf("trace ID = %q (context %q), reuse incoming = %v", got, logger.GetTraceID(c.Request.Context()), tt.want)
+			}
+		})
 	}
 }
 
@@ -70,7 +75,7 @@ func TestTrace_ReplacesAnUnsafeIncomingTraceID(t *testing.T) {
 			c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
 			c.Request.Header.Set(middleware.HeaderTraceID, incoming)
 
-			middleware.Trace(middleware.TraceOptions{})(c)
+			middleware.Trace(middleware.TraceOptions{TrustHeader: true})(c)
 
 			got := w.Header().Get(middleware.HeaderTraceID)
 			if got == incoming {

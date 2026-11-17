@@ -7,6 +7,7 @@ import (
 	"github.com/jun-develop/junkit/security"
 )
 
+// TestRandomBytes checks length and randomness.
 func TestRandomBytes(t *testing.T) {
 	a, b := security.RandomBytes(32), security.RandomBytes(32)
 	if len(a) != 32 || len(b) != 32 {
@@ -18,6 +19,7 @@ func TestRandomBytes(t *testing.T) {
 	}
 }
 
+// TestDecodeKey checks both base64 alphabets and invalid input.
 func TestDecodeKey(t *testing.T) {
 	want := bytes.Repeat([]byte{0xfb}, 32)
 	for _, in := range []string{

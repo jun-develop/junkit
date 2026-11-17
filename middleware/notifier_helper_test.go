@@ -1,44 +1,38 @@
 package middleware_test
 
 import (
+	"context"
+	"net/http"
 	"sync"
 
-	"github.com/gin-gonic/gin"
+	"github.com/jun-develop/junkit/notification"
 )
-
-// errorNotification is one call recorded by fakeNotifier.SendErrorNotification.
-type errorNotification struct {
-	data       map[string]any
-	statusCode int
-}
 
 // fakeNotifier mocks notification.Notifier by recording sent messages for testing.
 type fakeNotifier struct {
 	messages chan string
 
-	mu    sync.Mutex
-	sends []errorNotification
+	mu      sync.Mutex
+	reports []notification.ErrorReport
 }
 
 func newFakeNotifier() *fakeNotifier {
 	return &fakeNotifier{messages: make(chan string, 8)}
 }
 
-func (f *fakeNotifier) SendMessageHTML(_ *gin.Context, message string, _ string) {
-	f.messages <- message
+func (f *fakeNotifier) Send(_ context.Context, _ notification.Level, msg string) {
+	f.messages <- msg
 }
 
-func (f *fakeNotifier) SendErrorNotification(_ *gin.Context, errData map[string]any, statusCode int, _ ...string) {
+func (f *fakeNotifier) ReportError(_ context.Context, _ *http.Request, report notification.ErrorReport) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.sends = append(f.sends, errorNotification{data: errData, statusCode: statusCode})
+	f.reports = append(f.reports, report)
 }
 
-func (f *fakeNotifier) errorNotifications() []errorNotification {
+func (f *fakeNotifier) errorReports() []notification.ErrorReport {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]errorNotification, len(f.sends))
-	copy(out, f.sends)
 
-	return out
+	return append([]notification.ErrorReport(nil), f.reports...)
 }

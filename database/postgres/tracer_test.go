@@ -15,25 +15,36 @@ import (
 // emptyRows is a pgx.Rows with no rows.
 type emptyRows struct{ pgx.Rows }
 
-func (emptyRows) Next() bool                                   { return false }
-func (emptyRows) Err() error                                   { return nil }
-func (emptyRows) Close()                                       {}
+// Next reports that there are no rows.
+func (emptyRows) Next() bool { return false }
+
+// Err reports no error.
+func (emptyRows) Err() error { return nil }
+
+// Close does nothing.
+func (emptyRows) Close() {}
+
+// FieldDescriptions returns no columns.
 func (emptyRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
 
 // noRow is a pgx.Row for a query that matched nothing.
 type noRow struct{}
 
+// Scan reports pgx.ErrNoRows.
 func (noRow) Scan(...any) error { return pgx.ErrNoRows }
 
 // queryTx is a fakeTx that also answers queries, so traced statements can run inside a transaction.
 type queryTx struct{ fakeTx }
 
+// Exec reports one updated row.
 func (*queryTx) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }
 
+// Query returns no rows.
 func (*queryTx) Query(context.Context, string, ...any) (pgx.Rows, error) { return emptyRows{}, nil }
 
+// QueryRow returns a row that matched nothing.
 func (*queryTx) QueryRow(context.Context, string, ...any) pgx.Row { return noRow{} }
 
 // queryPool is a DBPool that answers queries and begins a queryTx.
@@ -42,14 +53,18 @@ type queryPool struct {
 	tx *queryTx
 }
 
+// Exec reports one updated row.
 func (*queryPool) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }
 
+// Query returns no rows.
 func (*queryPool) Query(context.Context, string, ...any) (pgx.Rows, error) { return emptyRows{}, nil }
 
+// QueryRow returns a row that matched nothing.
 func (*queryPool) QueryRow(context.Context, string, ...any) pgx.Row { return noRow{} }
 
+// Begin returns tx.
 func (p *queryPool) Begin(context.Context) (pgx.Tx, error) { return p.tx, nil }
 
 // TestExecutor_TracesEveryQuery is the tracer contract every engine package must pass: every query

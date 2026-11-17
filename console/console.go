@@ -64,15 +64,6 @@ func Stepf(icon, format string, a ...any) {
 	fmt.Printf(colorBold+icon+" "+ensureUpper(format)+colorReset+"\n", a...)
 }
 
-// NewError creates a formatted error without printing to stdout.
-//
-// Usage:
-//
-//	return console.NewError("read template %q: %w", path, err)
-func NewError(format string, a ...any) error {
-	return fmt.Errorf(format, a...)
-}
-
 // ensureUpper returns s with its first rune uppercased.
 func ensureUpper(s string) string {
 	if s == "" {

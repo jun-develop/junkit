@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"compress/gzip"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -31,7 +33,8 @@ func Gzip(opts GzipOptions) gin.HandlerFunc {
 	}
 
 	pool := sync.Pool{New: func() any {
-		gz, _ := gzip.NewWriterLevel(nil, level) // level is validated above, so err is always nil
+		// level is validated above, so err is always nil.
+		gz, _ := gzip.NewWriterLevel(nil, level)
 		return gz
 	}}
 
@@ -47,7 +50,10 @@ func Gzip(opts GzipOptions) gin.HandlerFunc {
 		c.Writer = w
 
 		defer func() {
-			w.close()
+			if err := w.close(); err != nil {
+				_ = c.Error(err)
+			}
+
 			c.Writer = w.ResponseWriter
 		}()
 
@@ -84,6 +90,7 @@ type gzipWriter struct {
 	size    int
 }
 
+// Write implements io.Writer, compressing data when decide chose to.
 func (w *gzipWriter) Write(data []byte) (int, error) {
 	if !w.decided {
 		w.decide()
@@ -99,6 +106,7 @@ func (w *gzipWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
+// Size reports the bytes the handler wrote, before compression, as gin's writer does.
 func (w *gzipWriter) Size() int {
 	if w.gz == nil {
 		return w.ResponseWriter.Size()
@@ -107,12 +115,18 @@ func (w *gzipWriter) Size() int {
 	return w.size
 }
 
+// WriteString implements io.StringWriter through Write, so strings are compressed too.
 func (w *gzipWriter) WriteString(s string) (int, error) {
 	return w.Write([]byte(s))
 }
 
-// Flush pushes buffered compressed bytes to the client before flushing the connection.
+// Flush pushes buffered compressed bytes to the client before flushing the connection. A flush
+// commits the headers, so compression is decided first.
 func (w *gzipWriter) Flush() {
+	if !w.decided {
+		w.decide()
+	}
+
 	if w.gz != nil {
 		_ = w.gz.Flush()
 	}
@@ -120,6 +134,15 @@ func (w *gzipWriter) Flush() {
 	w.ResponseWriter.Flush()
 }
 
+// WriteHeaderNow commits the headers. Before any body write it settles on no compression: the
+// response is usually bodiless (e.g. AbortWithStatus), and a later body must match the sent headers.
+func (w *gzipWriter) WriteHeaderNow() {
+	w.decided = true
+	w.ResponseWriter.WriteHeaderNow()
+}
+
+// decide picks compression from the headers and status the handler set, which are final once the
+// body starts; already-encoded, bodiless, ranged and streamed responses pass through.
 func (w *gzipWriter) decide() {
 	w.decided = true
 
@@ -139,12 +162,20 @@ func (w *gzipWriter) decide() {
 	w.gz.Reset(w.ResponseWriter)
 }
 
-func (w *gzipWriter) close() {
+// close flushes the gzip footer and returns the writer to the pool, detached from the response.
+func (w *gzipWriter) close() error {
 	if w.gz == nil {
-		return
+		return nil
 	}
 
-	_ = w.gz.Close()
+	err := w.gz.Close()
+	w.gz.Reset(io.Discard)
 	w.pool.Put(w.gz)
 	w.gz = nil
+
+	if err != nil {
+		return fmt.Errorf("middleware: gzip close: %w", err)
+	}
+
+	return nil
 }

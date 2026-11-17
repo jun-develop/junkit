@@ -12,22 +12,22 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/jun-develop/junkit/logger"
 	"github.com/jun-develop/junkit/middleware"
-	"github.com/jun-develop/junkit/response"
 )
 
 // newAccessLogRouter creates a test Gin router with AccessLog and observed logs.
 func newAccessLogRouter(opts middleware.AccessLogOptions, handler gin.HandlerFunc) (*gin.Engine, *observer.ObservedLogs) {
 	gin.SetMode(gin.TestMode)
 	core, logs := observer.New(zapcore.InfoLevel)
-	logger := zap.New(core)
+	log := zap.New(core)
 
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
-		c.Set(response.TraceIDContextKey, "trace-123")
+		c.Request = c.Request.WithContext(logger.WithTraceID(c.Request.Context(), "trace-123"))
 		c.Next()
 	})
-	router.Use(middleware.AccessLog(logger, opts))
+	router.Use(middleware.AccessLog(opts, log))
 	router.GET("/ping", handler)
 	router.POST("/login", handler)
 	router.GET("/health", handler)
@@ -180,7 +180,7 @@ func TestAccessLog_BodiesOnErrorOnly(t *testing.T) {
 
 	router := gin.New()
 	router.Use(middleware.Payload(middleware.PayloadOptions{MaxBodySize: 1 << 20}, newResponder()))
-	router.Use(middleware.AccessLog(zap.New(core), middleware.AccessLogOptions{BodiesOnErrorOnly: true}))
+	router.Use(middleware.AccessLog(middleware.AccessLogOptions{BodiesOnErrorOnly: true}, zap.New(core)))
 	router.POST("/ok", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"email": "a@b.com"}) })
 	router.POST("/bad", func(c *gin.Context) { c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid"}) })
 
@@ -191,11 +191,11 @@ func TestAccessLog_BodiesOnErrorOnly(t *testing.T) {
 	}
 
 	ok, bad := logs.All()[0].ContextMap(), logs.All()[1].ContextMap()
-	if ok["request_payload"] != nil || ok["response_payload"] != nil {
+	if ok["request_payload"] != nil || ok["response_payload"] != "" {
 		t.Errorf("2xx payloads = %v / %v, want both left out", ok["request_payload"], ok["response_payload"])
 	}
 
-	if bad["request_payload"] == nil || bad["response_payload"] == nil {
+	if bad["request_payload"] == nil || bad["response_payload"] == "" {
 		t.Errorf("4xx payloads = %v / %v, want both logged", bad["request_payload"], bad["response_payload"])
 	}
 }
@@ -205,11 +205,10 @@ func newAccessLogRouterWithPayload(t *testing.T) (*gin.Engine, *observer.Observe
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	core, logs := observer.New(zapcore.InfoLevel)
-	logger := zap.New(core)
 
 	router := gin.New()
 	router.Use(middleware.Payload(middleware.PayloadOptions{MaxBodySize: 1 << 20}, newResponder()))
-	router.Use(middleware.AccessLog(logger, middleware.AccessLogOptions{}))
+	router.Use(middleware.AccessLog(middleware.AccessLogOptions{}, zap.New(core)))
 	router.POST("/login", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
@@ -269,7 +268,7 @@ func TestAccessLog_MasksNestedFieldsInTopLevelArray(t *testing.T) {
 	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ping", nil))
 
 	got := fmt.Sprint(logs.All()[0].ContextMap()["response_payload"])
-	if strings.Contains(got, "t1") || strings.Contains(got, "k1") || !strings.Contains(got, "name:ok") {
+	if strings.Contains(got, "t1") || strings.Contains(got, "k1") || !strings.Contains(got, `"name":"ok"`) {
 		t.Fatalf("response_payload = %s, want accessToken and API-Key masked, name kept", got)
 	}
 }
@@ -280,7 +279,7 @@ func TestAccessLog_RespSizeIsUncompressedInsideGzip(t *testing.T) {
 	body := strings.Repeat("a", 1000)
 
 	router := gin.New()
-	router.Use(middleware.Gzip(middleware.GzipOptions{}), middleware.AccessLog(zap.New(core), middleware.AccessLogOptions{}))
+	router.Use(middleware.Gzip(middleware.GzipOptions{}), middleware.AccessLog(middleware.AccessLogOptions{}, zap.New(core)))
 	router.GET("/ping", func(c *gin.Context) { c.String(http.StatusOK, body) })
 
 	req := httptest.NewRequest(http.MethodGet, "/ping", nil)

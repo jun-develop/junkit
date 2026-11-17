@@ -18,7 +18,7 @@ import (
 func TestQueryTracer_FailedQueryLogsOriginWithoutStack(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	log := zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel))
-	qt := postgres.NewQueryTracerForTest(log, 0)
+	qt := postgres.NewQueryTracerForTest(log, 0, true)
 
 	qt.Log(context.Background(), tracelog.LogLevelError, "Query", map[string]any{
 		"sql":  "-- name: CreateUser :one\nINSERT INTO users (email) VALUES ($1)",
@@ -57,11 +57,44 @@ func TestQueryTracer_FailedQueryLogsOriginWithoutStack(t *testing.T) {
 
 func TestQueryTracer_SuccessfulQueryHasNoOrigin(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
-	qt := postgres.NewQueryTracerForTest(zap.New(core), 0)
+	qt := postgres.NewQueryTracerForTest(zap.New(core), 0, false)
 
 	qt.Log(context.Background(), tracelog.LogLevelInfo, "Query", map[string]any{"sql": "SELECT 1", "time": time.Millisecond})
 
 	if _, ok := logs.All()[0].ContextMap()["location"]; ok {
 		t.Error("a successful query should not pay for locating its caller")
+	}
+}
+
+func TestQueryTracer_ArgsInlinedOnlyWhenEnabled(t *testing.T) {
+	tests := []struct {
+		name       string
+		inlineArgs bool
+		wantSQL    string
+	}{
+		{name: "default keeps placeholders", inlineArgs: false, wantSQL: "SELECT * FROM users WHERE email = $1"},
+		{name: "LogQueryArgs inlines values", inlineArgs: true, wantSQL: "SELECT * FROM users WHERE email = 'jane@example.com'"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.DebugLevel)
+			qt := postgres.NewQueryTracerForTest(zap.New(core), 0, tt.inlineArgs)
+
+			qt.Log(context.Background(), tracelog.LogLevelInfo, "Query", map[string]any{
+				"sql":  "SELECT * FROM users WHERE email = $1",
+				"args": []any{"jane@example.com"},
+				"time": time.Millisecond,
+			})
+
+			fields := logs.All()[0].ContextMap()
+			if fields["sql"] != tt.wantSQL {
+				t.Errorf("sql = %v, want %q", fields["sql"], tt.wantSQL)
+			}
+
+			if fields["arg_count"] != int64(1) {
+				t.Errorf("arg_count = %v, want 1", fields["arg_count"])
+			}
+		})
 	}
 }

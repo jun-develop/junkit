@@ -1,6 +1,5 @@
-// Package sqlfmt parses sqlc query annotations, renders SQL with bound
-// arguments, and locates the code that ran a query, for logging and debugging.
-// It is shared by database and tracer.
+// Package sqlfmt parses sqlc query annotations, renders SQL with bound arguments, and locates the
+// code that ran a query, for logging and debugging. It is shared by database and tracer.
 package sqlfmt
 
 import (
@@ -98,7 +97,11 @@ func guessName(sql string) string {
 	}
 }
 
-// Bind replaces Postgres placeholders ($1, $2, ...) in sql with argument literals.
+// Bind replaces Postgres placeholders ($1, $2, ...) in sql with argument literals. A $N inside a
+// single-quoted string or a dollar-quoted body ($$...$$, $tag$...$tag$) is left as-is.
+//
+// shortcut: backslash escapes in E'...' strings are not tracked, so E'it\'s $1' is misread;
+// handle them if such queries ever show up in logs.
 func Bind(sql string, args []any) string {
 	if len(args) == 0 {
 		return sql
@@ -108,10 +111,17 @@ func Bind(sql string, args []any) string {
 	sb.Grow(len(sql) + len(args)*16)
 
 	for i := 0; i < len(sql); i++ {
-		if sql[i] == '$' && i+1 < len(sql) && sql[i+1] >= '0' && sql[i+1] <= '9' {
+		// skip is how many bytes from i to copy verbatim: a whole quoted string or dollar-quoted body.
+		skip := 0
+
+		switch {
+		case sql[i] == '\'':
+			// A doubled '' closes this span and opens the next, which copies the same text.
+			skip = closingSpan(sql, i, "'")
+		case sql[i] == '$' && i+1 < len(sql) && isDigit(sql[i+1]):
 			idx := 0
 			j := i + 1
-			for j < len(sql) && sql[j] >= '0' && sql[j] <= '9' {
+			for j < len(sql) && isDigit(sql[j]) {
 				idx = idx*10 + int(sql[j]-'0')
 				j++
 			}
@@ -119,14 +129,60 @@ func Bind(sql string, args []any) string {
 			if idx > 0 && idx <= len(args) {
 				sb.WriteString(FormatValue(args[idx-1]))
 				i = j - 1
+
 				continue
 			}
+		case sql[i] == '$':
+			if tag, ok := dollarTag(sql[i:]); ok {
+				skip = closingSpan(sql, i, tag)
+			}
+		}
+
+		if skip > 0 {
+			sb.WriteString(sql[i : i+skip])
+			i += skip - 1
+
+			continue
 		}
 
 		sb.WriteByte(sql[i])
 	}
 
 	return sb.String()
+}
+
+// closingSpan returns the length of the span that opens with delim at sql[i] and ends with the
+// next delim, or the rest of sql when it is never closed.
+func closingSpan(sql string, i int, delim string) int {
+	end := strings.Index(sql[i+len(delim):], delim)
+	if end < 0 {
+		return len(sql) - i
+	}
+
+	return len(delim) + end + len(delim)
+}
+
+// dollarTag returns the dollar-quote opening tag ("$$" or "$name$") at the start of s; ok is
+// false when s does not start with one.
+func dollarTag(s string) (tag string, ok bool) {
+	for j := 1; j < len(s); j++ {
+		c := s[j]
+		if c == '$' {
+			return s[:j+1], true
+		}
+
+		isLetter := c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 0x80
+		if !isLetter && (j == 1 || !isDigit(c)) {
+			return "", false
+		}
+	}
+
+	return "", false
+}
+
+// isDigit reports whether c is an ASCII digit.
+func isDigit(c byte) bool {
+	return c >= '0' && c <= '9'
 }
 
 // BindQuestion replaces positional ? placeholders (MySQL, ClickHouse, SQLite) in sql with argument
@@ -226,7 +282,9 @@ func arrayLiteral(rv reflect.Value) string {
 		lit := FormatValue(rv.Index(i).Interface())
 		body, quoted := strings.CutPrefix(lit, "'")
 		if !quoted {
-			parts[i] = lit // NULL, numbers and booleans are written bare
+			// NULL, numbers and booleans are written bare.
+			parts[i] = lit
+
 			continue
 		}
 

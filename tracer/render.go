@@ -81,9 +81,10 @@ func summarizeDB(entries []LogEntry, totalMS float64) DBSummary {
 			s.Failed++
 		}
 
+		// Entries appended by hand carry no query, so they group by label.
 		key := data.query
 		if key == "" {
-			key = e.Label // entries appended by hand carry no query
+			key = e.Label
 		}
 
 		q := groups[key]

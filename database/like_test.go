@@ -6,7 +6,7 @@ import (
 	"github.com/jun-develop/junkit/database"
 )
 
-func TestEscapeLike(t *testing.T) {
+func TestEscapeLike_EscapesWildcards(t *testing.T) {
 	tests := map[string]string{
 		"plain":  "plain",
 		"50%":    `50\%`,
@@ -15,8 +15,10 @@ func TestEscapeLike(t *testing.T) {
 		`\%`:     `\\\%`,
 	}
 	for in, want := range tests {
-		if got := database.EscapeLike(in); got != want {
-			t.Errorf("EscapeLike(%q) = %q, want %q", in, got, want)
-		}
+		t.Run(in, func(t *testing.T) {
+			if got := database.EscapeLike(in); got != want {
+				t.Errorf("EscapeLike(%q) = %q, want %q", in, got, want)
+			}
+		})
 	}
 }

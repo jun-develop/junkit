@@ -1,3 +1,5 @@
+// Package response writes localized JSON API responses in a standard envelope and maps domain
+// errors (AppError) to HTTP status codes.
 package response
 
 import (
@@ -6,13 +8,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/jun-develop/junkit/logger"
 	"github.com/jun-develop/junkit/pagination"
 )
 
-// Context keys set by middleware.Trace and read to construct APIInfo.
+// Gin context keys set by middleware.Trace and read to construct APIInfo. The trace ID is not
+// one of them: it is read from the request context via logger.GetTraceID.
 const (
 	StartTimeContextKey = "start_time"
-	TraceIDContextKey   = "trace_id"
 	VersionContextKey   = "api_version"
 	EnvContextKey       = "api_env"
 )
@@ -25,13 +28,12 @@ type PaginatedData struct {
 
 // Response defines the standard JSON API response envelope.
 type Response struct {
-	Status     string    `json:"status"`
-	Code       ErrorCode `json:"code,omitempty"`
-	Message    string    `json:"message,omitempty"`
-	Data       any       `json:"data,omitempty"`
-	Error      any       `json:"error,omitempty"`
-	Pagination any       `json:"pagination,omitempty"`
-	APIInfo    *APIInfo  `json:"api_info,omitempty"`
+	Status  string    `json:"status"`
+	Code    ErrorCode `json:"code,omitempty"`
+	Message string    `json:"message,omitempty"`
+	Data    any       `json:"data,omitempty"`
+	Error   any       `json:"error,omitempty"`
+	APIInfo *APIInfo  `json:"api_info,omitempty"`
 }
 
 // APIInfo carries request diagnostic metadata (trace ID, timestamp, latency, version).
@@ -43,29 +45,24 @@ type APIInfo struct {
 	Env       string `json:"env,omitempty" example:"production"`
 }
 
-// getAPIInfo constructs APIInfo from values stored in the Gin context.
-func getAPIInfo(ctx *gin.Context) *APIInfo {
+// getAPIInfo constructs APIInfo from the request context and values stored in the Gin context.
+func getAPIInfo(c *gin.Context) *APIInfo {
 	info := &APIInfo{
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
 
-	if startTime, exists := ctx.Get(StartTimeContextKey); exists {
+	if startTime, exists := c.Get(StartTimeContextKey); exists {
 		if t, ok := startTime.(time.Time); ok {
 			info.Latency = fmt.Sprintf("%.3fms", float64(time.Since(t).Microseconds())/1000.0)
 		}
 	}
 
-	if val, ok := ctx.Get(TraceIDContextKey); ok {
-		info.TraceID, _ = val.(string)
+	if c.Request != nil {
+		info.TraceID = logger.GetTraceID(c.Request.Context())
 	}
 
-	if val, ok := ctx.Get(VersionContextKey); ok {
-		info.Version, _ = val.(string)
-	}
-
-	if val, ok := ctx.Get(EnvContextKey); ok {
-		info.Env, _ = val.(string)
-	}
+	info.Version = c.GetString(VersionContextKey)
+	info.Env = c.GetString(EnvContextKey)
 
 	return info
 }

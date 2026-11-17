@@ -13,16 +13,17 @@ import (
 	"github.com/jun-develop/junkit/database"
 )
 
+// pgError returns a PgError with code and a fixed message and constraint name.
 func pgError(code string) *pgconn.PgError {
 	return &pgconn.PgError{Code: code, Message: "boom", ConstraintName: "uq_test"}
 }
 
-func TestClassify(t *testing.T) {
+func TestClassify_MapsPgErrors(t *testing.T) {
 	tests := []struct {
 		name       string
 		err        error
 		wantType   database.ErrorType
-		wantDetail string // exact match; "" skips the check
+		wantDetail string
 	}{
 		{
 			name:       "nil error",
@@ -119,7 +120,7 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-func TestClassify_constraintNameIsIncludedInDetail(t *testing.T) {
+func TestClassify_IncludesConstraintNameInDetail(t *testing.T) {
 	_, detail := database.Classify(pgError("23505"))
 
 	if !strings.Contains(detail, "uq_test") {
@@ -127,7 +128,7 @@ func TestClassify_constraintNameIsIncludedInDetail(t *testing.T) {
 	}
 }
 
-func TestPredicates(t *testing.T) {
+func TestPredicates_MatchPgErrors(t *testing.T) {
 	tests := []struct {
 		name           string
 		err            error
@@ -171,7 +172,7 @@ func TestPredicates(t *testing.T) {
 	}
 }
 
-func TestMatch(t *testing.T) {
+func TestMatch_TranslatesPgErrors(t *testing.T) {
 	errEmailExists := errors.New("email already exists")
 	errNotFound := errors.New("user not found")
 
@@ -194,7 +195,8 @@ func TestMatch(t *testing.T) {
 	})
 
 	t.Run("unmapped error type passes through unchanged", func(t *testing.T) {
-		original := pgError("23503") // foreign key violation has no entry in mapping
+		// A foreign key violation has no entry in mapping.
+		original := pgError("23503")
 		got := database.Match(original, mapping)
 		if !errors.Is(got, original) {
 			t.Fatalf("Match() = %v, want the original error unchanged", got)

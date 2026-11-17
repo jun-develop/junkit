@@ -13,7 +13,8 @@ const tracerPackagePrefix = "github.com/jun-develop/junkit/tracer."
 // (e.g. from a deferred recover handler), it returns the frame that panicked instead.
 func FindErrorOrigin() (string, int, string) {
 	pc := make([]uintptr, 64)
-	// skip=3 skips runtime.Callers, FindErrorOrigin, and the calling log helper.
+	// skip=3 skips runtime.Callers, FindErrorOrigin and its direct caller (a tracer helper or a
+	// deferred recover handler), whose own location is never the origin.
 	n := runtime.Callers(3, pc)
 	frames := runtime.CallersFrames(pc[:n])
 
@@ -26,7 +27,6 @@ func FindErrorOrigin() (string, int, string) {
 			found = false
 		case !found &&
 			!strings.Contains(frame.File, "/runtime/") &&
-			!strings.Contains(frame.File, "/src/runtime/") &&
 			!strings.HasPrefix(frame.Function, tracerPackagePrefix):
 			file, line, fn, found = frame.File, frame.Line, frame.Function, true
 		}

@@ -5,8 +5,6 @@ import (
 	"net"
 	"net/http"
 	"time"
-
-	"go.uber.org/fx"
 )
 
 // Options configures an HTTP client instance.
@@ -33,13 +31,16 @@ type Options struct {
 	// Default 10s.
 	ResponseHeaderTimeout time.Duration
 
-	// MaxRetries is the maximum number of retry attempts (0 disables retries).
+	// MaxRetries is the maximum number of retry attempts (0 disables retries). Only idempotent
+	// methods, or requests with an Idempotency-Key header, are retried, and only when their body
+	// can be replayed through Request.GetBody.
 	MaxRetries int
 
 	// RetryWaitMin is the backoff before the first retry. Default 200ms.
 	RetryWaitMin time.Duration
 
-	// RetryWaitMax caps the exponentially-growing backoff between retries. Default 5s.
+	// RetryWaitMax caps every wait between retries, including jitter and a server's Retry-After.
+	// Default 5s.
 	RetryWaitMax time.Duration
 }
 
@@ -84,15 +85,6 @@ func (o Options) withDefaults() Options {
 
 	return o
 }
-
-// Module provides an Fx module that builds an *http.Client from Options.
-//
-// Usage:
-//
-//	fx.New(fx.Supply(httpclient.Options{MaxRetries: 2}), httpclient.Module)
-var Module = fx.Module("httpclient",
-	fx.Provide(NewClient),
-)
 
 // NewClient builds an *http.Client configured by opts.
 //

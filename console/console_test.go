@@ -1,7 +1,6 @@
 package console_test
 
 import (
-	"errors"
 	"io"
 	"os"
 	"strings"
@@ -9,23 +8,6 @@ import (
 
 	"github.com/jun-develop/junkit/console"
 )
-
-func TestNewError(t *testing.T) {
-	cause := errors.New("connection refused")
-	err := console.NewError("read %q: %w", "config.yaml", cause)
-
-	if err == nil {
-		t.Fatal("NewError() = nil")
-	}
-
-	if !errors.Is(err, cause) {
-		t.Fatal("errors.Is(err, cause) should be true — NewError must support %w wrapping")
-	}
-
-	if want := `read "config.yaml": connection refused`; err.Error() != want {
-		t.Fatalf("Error() = %q, want %q", err.Error(), want)
-	}
-}
 
 // captureStdout redirects os.Stdout for the duration of fn and returns
 // whatever was written.

@@ -1,5 +1,3 @@
-// Package middleware provides Gin HTTP middleware: CORS, rate limiting, panic recovery, security
-// headers, tracing, payload and access logging, and authentication.
 package middleware
 
 import (
@@ -13,7 +11,7 @@ import (
 
 // CORSOptions configures CORS middleware.
 type CORSOptions struct {
-	// AllowOrigins lists permitted origins; use "*" to allow any origin.
+	// AllowOrigins lists permitted origins; use "*" to allow any origin (not with AllowCredentials).
 	AllowOrigins []string
 
 	// AllowMethods lists permitted HTTP methods (e.g. GET, POST).
@@ -22,15 +20,15 @@ type CORSOptions struct {
 	// AllowHeaders lists permitted request headers.
 	AllowHeaders []string
 
-	// AllowCredentials sets the Access-Control-Allow-Credentials header; with "*" origins the
-	// request origin is echoed instead, since browsers reject "*" with credentials.
+	// AllowCredentials sets the Access-Control-Allow-Credentials header.
 	AllowCredentials bool
 
 	// MaxAge is the preflight cache duration in seconds (Access-Control-Max-Age).
 	MaxAge int
 }
 
-// CORS creates a middleware that validates cross-origin requests.
+// CORS creates a middleware that validates cross-origin requests. It panics when AllowOrigins holds
+// "*" with AllowCredentials, which would let any site make credentialed requests.
 //
 // Usage:
 //
@@ -44,35 +42,38 @@ func CORS(opts CORSOptions) gin.HandlerFunc {
 	allowMethods := strings.Join(opts.AllowMethods, ", ")
 	maxAge := strconv.Itoa(opts.MaxAge)
 	allowAll := slices.Contains(opts.AllowOrigins, "*")
+	if allowAll && opts.AllowCredentials {
+		panic("middleware: CORS AllowOrigins \"*\" cannot be combined with AllowCredentials; list the origins")
+	}
 
-	return func(ctx *gin.Context) {
-		origin := ctx.GetHeader("Origin")
-		ctx.Writer.Header().Add("Vary", "Origin")
+	return func(c *gin.Context) {
+		origin := c.GetHeader("Origin")
+		c.Writer.Header().Add("Vary", "Origin")
 
 		if origin != "" {
 			isAllowed := allowAll || slices.Contains(opts.AllowOrigins, origin)
 			if isAllowed {
-				if allowAll && !opts.AllowCredentials {
-					ctx.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+				if allowAll {
+					c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 				} else {
-					ctx.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+					c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 				}
 
 				if opts.AllowCredentials {
-					ctx.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+					c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 				}
 			}
 		}
 
-		ctx.Writer.Header().Set("Access-Control-Allow-Headers", allowHeaders)
-		ctx.Writer.Header().Set("Access-Control-Allow-Methods", allowMethods)
-		ctx.Writer.Header().Set("Access-Control-Max-Age", maxAge)
+		c.Writer.Header().Set("Access-Control-Allow-Headers", allowHeaders)
+		c.Writer.Header().Set("Access-Control-Allow-Methods", allowMethods)
+		c.Writer.Header().Set("Access-Control-Max-Age", maxAge)
 
-		if ctx.Request.Method == http.MethodOptions {
-			ctx.AbortWithStatus(http.StatusNoContent)
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
 
-		ctx.Next()
+		c.Next()
 	}
 }

@@ -15,6 +15,18 @@ import (
 	"github.com/jun-develop/junkit/validation"
 )
 
+// newValidator returns a Validator built from opts, failing the test on error.
+func newValidator(t *testing.T, opts validation.Options) *validation.Validator {
+	t.Helper()
+	v, err := validation.NewValidator(opts, i18n.NewTranslator())
+	if err != nil {
+		t.Fatalf("NewValidator() error = %v", err)
+	}
+
+	return v
+}
+
+// newTestContext returns a gin test context carrying a JSON request with body.
 func newTestContext(t *testing.T, method, target, body string) *gin.Context {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -28,9 +40,8 @@ func newTestContext(t *testing.T, method, target, body string) *gin.Context {
 	return c
 }
 
-func TestGetValidationErrors(t *testing.T) {
-	translator := i18n.NewTranslator()
-	v := validation.NewValidator(validation.Options{Language: "en"}, translator)
+func TestValidator_GetValidationErrors(t *testing.T) {
+	v := newValidator(t, validation.Options{})
 
 	t.Run("nil error returns nil", func(t *testing.T) {
 		if got := v.GetValidationErrors(nil, nil); got != nil {
@@ -167,9 +178,12 @@ func TestGetValidationErrors(t *testing.T) {
 	})
 }
 
-func TestValidator_translate(t *testing.T) {
+func TestValidator_Translate(t *testing.T) {
 	t.Run("a nil translator falls back to the given default", func(t *testing.T) {
-		v := validation.NewValidator(validation.Options{Language: "en"}, nil)
+		v, err := validation.NewValidator(validation.Options{}, nil)
+		if err != nil {
+			t.Fatalf("NewValidator() error = %v", err)
+		}
 
 		ctx := newTestContext(t, http.MethodPost, "/", `{}`)
 		type req struct {
@@ -179,11 +193,13 @@ func TestValidator_translate(t *testing.T) {
 		bindErr := ctx.ShouldBindJSON(&body)
 
 		got := v.GetValidationErrors(ctx, bindErr)
-		want := map[string]string{"name": "required"} // fallback is the raw tag name
+		// The fallback is the raw tag name.
+		want := map[string]string{"name": "required"}
 		assertMapEqual(t, got, want)
 	})
 }
 
+// assertMapEqual fails the test unless got is a map[string]string equal to want.
 func assertMapEqual(t *testing.T, got any, want map[string]string) {
 	t.Helper()
 

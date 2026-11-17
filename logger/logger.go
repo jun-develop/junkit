@@ -35,7 +35,8 @@ type Options struct {
 	// the Environment-based default.
 	Output string
 
-	// Level is the minimum log level (debug, info, warn, error); invalid values fall back to info.
+	// Level is the minimum log level (debug, info, warn, error); empty means info and any other
+	// value makes New fail.
 	Level string
 
 	// Filename is the log file path used outside development.
@@ -61,13 +62,13 @@ type Options struct {
 //
 // Usage:
 //
-//	l, err := logger.New(lc, logger.Options{
+//	l, err := logger.New(logger.Options{
 //	    Environment: "production", Level: "info", Filename: "logs/app.log",
-//	})
-func New(lc fx.Lifecycle, opts Options) (*zap.Logger, error) {
+//	}, lc)
+func New(opts Options, lc fx.Lifecycle) (*zap.Logger, error) {
 	var level zapcore.Level
 	if err := level.Set(opts.Level); err != nil {
-		level = zapcore.InfoLevel
+		return nil, fmt.Errorf("logger: parse level %q: %w", opts.Level, err)
 	}
 
 	output := opts.Output
@@ -79,7 +80,7 @@ func New(lc fx.Lifecycle, opts Options) (*zap.Logger, error) {
 		core zapcore.Core
 		stop func() error
 	)
-	
+
 	if output == OutputConsole {
 		consoleEncoderCfg := zap.NewDevelopmentEncoderConfig()
 		consoleEncoderCfg.EncodeTime = zapcore.TimeEncoderOfLayout("2006-01-02 15:04:05")
@@ -104,6 +105,7 @@ func New(lc fx.Lifecycle, opts Options) (*zap.Logger, error) {
 			Size:          256 << 10,
 			FlushInterval: time.Second,
 		}
+
 		stop = fileWriter.Stop
 
 		core = zapcore.NewCore(fileEncoder, fileWriter, level)
@@ -113,8 +115,10 @@ func New(lc fx.Lifecycle, opts Options) (*zap.Logger, error) {
 
 	lc.Append(fx.Hook{
 		OnStop: func(context.Context) error {
+			// Best-effort flush: Sync on stdout often fails harmlessly (e.g. EINVAL on a TTY).
 			_ = zapLogger.Sync()
 			if stop != nil {
+				// Best-effort: shutdown must not fail over a final flush.
 				_ = stop()
 			}
 
@@ -124,15 +128,6 @@ func New(lc fx.Lifecycle, opts Options) (*zap.Logger, error) {
 
 	return zapLogger, nil
 }
-
-// Module provides the Fx module for building *zap.Logger from Options.
-//
-// Usage:
-//
-//	fx.New(fx.Supply(logger.Options{Environment: "development", Level: "debug"}), logger.Module)
-var Module = fx.Module("logger",
-	fx.Provide(New),
-)
 
 // Definition configures a named logging channel for ProvideNamed.
 type Definition struct {
@@ -165,7 +160,7 @@ func ProvideNamed(defs []Definition, shared Options) []fx.Option {
 		}
 
 		constructor := func(lc fx.Lifecycle) (*zap.Logger, error) {
-			return New(lc, Options{
+			return New(Options{
 				Environment: shared.Environment,
 				Output:      shared.Output,
 				Level:       def.Level,
@@ -174,7 +169,7 @@ func ProvideNamed(defs []Definition, shared Options) []fx.Option {
 				MaxBackups:  shared.MaxBackups,
 				MaxAge:      shared.MaxAge,
 				Compress:    shared.Compress,
-			})
+			}, lc)
 		}
 
 		nameTag := fmt.Sprintf(`name:"%s"`, name)
@@ -200,7 +195,7 @@ func WithTraceID(ctx context.Context, traceID string) context.Context {
 	return context.WithValue(ctx, TraceIDKey, traceID)
 }
 
-// GetTraceID returns the trace ID stored in ctx, or "" if there is none.
+// GetTraceID returns the trace ID stored in ctx by WithTraceID, or "" if there is none.
 //
 // Usage:
 //
@@ -210,18 +205,7 @@ func GetTraceID(ctx context.Context) string {
 		return ""
 	}
 
-	if val := ctx.Value(TraceIDKey); val != nil {
-		if traceID, ok := val.(string); ok {
-			return traceID
-		}
-	}
+	traceID, _ := ctx.Value(TraceIDKey).(string)
 
-	// Fallback for middlewares storing "trace_id" as a raw string key.
-	if val := ctx.Value("trace_id"); val != nil {
-		if traceID, ok := val.(string); ok {
-			return traceID
-		}
-	}
-
-	return ""
+	return traceID
 }

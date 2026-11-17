@@ -6,6 +6,7 @@ import (
 	"github.com/jun-develop/junkit/security"
 )
 
+// TestClientKey checks IPv6 /64 grouping and IPv4 passthrough.
 func TestClientKey(t *testing.T) {
 	tests := []struct{ ip, want string }{
 		{"203.0.113.7", "203.0.113.7"},
@@ -19,8 +20,10 @@ func TestClientKey(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := security.ClientKey(tt.ip); got != tt.want {
-			t.Errorf("ClientKey(%q) = %q, want %q", tt.ip, got, tt.want)
-		}
+		t.Run(tt.ip, func(t *testing.T) {
+			if got := security.ClientKey(tt.ip); got != tt.want {
+				t.Errorf("ClientKey(%q) = %q, want %q", tt.ip, got, tt.want)
+			}
+		})
 	}
 }

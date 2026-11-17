@@ -9,16 +9,16 @@ import (
 	"github.com/jun-develop/junkit/cache"
 )
 
-func TestNoopCache(t *testing.T) {
+func TestNoop(t *testing.T) {
 	ctx := context.Background()
-	c := cache.NewNoopCache[string]()
+	c := cache.NewNoop[string]()
 
 	if err := c.Set(ctx, "key", "value", time.Minute); err != nil {
 		t.Fatalf("Set() error = %v, want nil", err)
 	}
 
 	if _, ok := c.Get(ctx, "key"); ok {
-		t.Fatal("Get() reported a hit right after Set() — NoopCache must never retain anything")
+		t.Fatal("Get() reported a hit right after Set() — Noop must never retain anything")
 	}
 
 	if exists, err := c.Exists(ctx, "key"); err != nil || exists {
@@ -29,14 +29,14 @@ func TestNoopCache(t *testing.T) {
 		t.Fatalf("Delete() error = %v, want nil", err)
 	}
 
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close() error = %v, want nil", err)
+	if _, hit, err := c.Lookup(ctx, "key"); hit || err != nil {
+		t.Fatalf("Lookup() = %v, %v, want false, nil", hit, err)
 	}
 }
 
-func TestNoopCache_GetOrSet(t *testing.T) {
+func TestNoop_GetOrSet(t *testing.T) {
 	ctx := context.Background()
-	c := cache.NewNoopCache[string]()
+	c := cache.NewNoop[string]()
 
 	t.Run("always calls fetchFn", func(t *testing.T) {
 		called := false

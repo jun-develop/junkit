@@ -14,17 +14,19 @@ import (
 	"github.com/jun-develop/junkit/tracer"
 )
 
-// fakeDB is a dbtx whose Query returns the configured rows (or error).
+// fakeDB is a DBTX whose Query returns the configured rows (or error).
 type fakeDB struct {
 	cols     []string
 	rows     [][]any
 	queryErr error
 }
 
+// Exec reports three rows updated.
 func (f *fakeDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
 	return pgconn.NewCommandTag("UPDATE 3"), nil
 }
 
+// Query returns the configured rows, or queryErr.
 func (f *fakeDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
 	if f.queryErr != nil {
 		return nil, f.queryErr
@@ -33,6 +35,7 @@ func (f *fakeDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
 	return &fakeRows{cols: f.cols, rows: f.rows, i: -1}, nil
 }
 
+// QueryRow panics; the wrapper must route QueryRow through Query.
 func (f *fakeDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	panic("the tracing wrapper should route QueryRow through Query")
 }
@@ -44,14 +47,28 @@ type fakeRows struct {
 	i    int
 }
 
-func (r *fakeRows) Close()                        {}
-func (r *fakeRows) Err() error                    { return nil }
-func (r *fakeRows) CommandTag() pgconn.CommandTag { return pgconn.CommandTag{} }
-func (r *fakeRows) Next() bool                    { r.i++; return r.i < len(r.rows) }
-func (r *fakeRows) Values() ([]any, error)        { return r.rows[r.i], nil }
-func (r *fakeRows) RawValues() [][]byte           { return nil }
-func (r *fakeRows) Conn() *pgx.Conn               { return nil }
+// Close is a no-op.
+func (r *fakeRows) Close() {}
 
+// Err always reports success.
+func (r *fakeRows) Err() error { return nil }
+
+// CommandTag returns an empty tag.
+func (r *fakeRows) CommandTag() pgconn.CommandTag { return pgconn.CommandTag{} }
+
+// Next advances to the following row.
+func (r *fakeRows) Next() bool { r.i++; return r.i < len(r.rows) }
+
+// Values returns the current row.
+func (r *fakeRows) Values() ([]any, error) { return r.rows[r.i], nil }
+
+// RawValues is unused by the wrapper.
+func (r *fakeRows) RawValues() [][]byte { return nil }
+
+// Conn is unused by the wrapper.
+func (r *fakeRows) Conn() *pgx.Conn { return nil }
+
+// FieldDescriptions describes the configured columns.
 func (r *fakeRows) FieldDescriptions() []pgconn.FieldDescription {
 	fds := make([]pgconn.FieldDescription, len(r.cols))
 	for i, c := range r.cols {
@@ -61,6 +78,7 @@ func (r *fakeRows) FieldDescriptions() []pgconn.FieldDescription {
 	return fds
 }
 
+// Scan copies the current row into *int, *string or *[]byte destinations.
 func (r *fakeRows) Scan(dest ...any) error {
 	for i, d := range dest {
 		switch p := d.(type) {
@@ -89,6 +107,7 @@ func sqlEntries(t *testing.T, d *tracer.Debugger) []tracer.LogEntry {
 	return logs
 }
 
+// TestPgxWrapper_PassesThroughWithoutDebugger checks untraced pass-through without a Debugger.
 func TestPgxWrapper_PassesThroughWithoutDebugger(t *testing.T) {
 	db := tracer.NewPgxWrapper(&fakeDB{cols: []string{"id"}, rows: [][]any{{1}}})
 
@@ -102,6 +121,7 @@ func TestPgxWrapper_PassesThroughWithoutDebugger(t *testing.T) {
 	}
 }
 
+// TestPgxWrapper_Exec checks Exec records the statement and rows affected.
 func TestPgxWrapper_Exec(t *testing.T) {
 	ctx, d := newCtx()
 	db := tracer.NewPgxWrapper(&fakeDB{})
@@ -125,6 +145,7 @@ func TestPgxWrapper_Exec(t *testing.T) {
 	}
 }
 
+// TestPgxWrapper_QueryRecordsRowsOnceOnClose checks rows are recorded once, on Close.
 func TestPgxWrapper_QueryRecordsRowsOnceOnClose(t *testing.T) {
 	ctx, d := newCtx()
 	db := tracer.NewPgxWrapper(&fakeDB{
@@ -146,7 +167,8 @@ func TestPgxWrapper_QueryRecordsRowsOnceOnClose(t *testing.T) {
 	}
 
 	rows.Close()
-	rows.Close() // e.g. an explicit Close plus a deferred one
+	// An explicit Close plus a deferred one must still record once.
+	rows.Close()
 
 	logs := sqlEntries(t, d)
 	if len(logs) != 1 {
@@ -164,6 +186,7 @@ func TestPgxWrapper_QueryRecordsRowsOnceOnClose(t *testing.T) {
 	}
 }
 
+// TestPgxWrapper_QueryRow checks QueryRow records the row it scans.
 func TestPgxWrapper_QueryRow(t *testing.T) {
 	t.Run("records the scanned row", func(t *testing.T) {
 		ctx, d := newCtx()
@@ -231,6 +254,7 @@ func TestPgxWrapper_QueryRow(t *testing.T) {
 	})
 }
 
+// TestBeginQuery_DriverIndependent checks BeginQuery with a non-pgx bind func.
 func TestBeginQuery_DriverIndependent(t *testing.T) {
 	if q := tracer.BeginQuery(context.Background(), "SELECT 1", nil, sqlfmt.Bind); q != nil {
 		t.Fatal("BeginQuery() without a Debugger returned a query, want nil")

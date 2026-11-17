@@ -5,8 +5,6 @@ import (
 	"os"
 	"regexp"
 	"strconv"
-
-	"github.com/jun-develop/junkit/console"
 )
 
 // migrationSeqPattern matches "NNNNNN_name.up.sql" and captures the sequence number.
@@ -25,7 +23,7 @@ func NextMigrationSeq(dir string) (string, error) {
 			return "000001", nil
 		}
 
-		return "", console.NewError("read %s: %w", dir, err)
+		return "", fmt.Errorf("scaffold: read %s: %w", dir, err)
 	}
 
 	max := 0

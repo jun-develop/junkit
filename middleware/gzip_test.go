@@ -95,3 +95,53 @@ func TestGzip(t *testing.T) {
 		}
 	})
 }
+
+func TestGzip_HeadersCommittedEarlyMatchTheBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(middleware.Gzip(middleware.GzipOptions{}))
+	r.GET("/flush", func(c *gin.Context) {
+		c.Writer.Flush()
+		c.String(http.StatusOK, "streamed")
+	})
+	r.GET("/abort", func(c *gin.Context) {
+		c.AbortWithStatus(http.StatusUnauthorized)
+	})
+
+	tests := []struct {
+		path     string
+		wantGzip bool
+		wantBody string
+	}{
+		{"/flush", true, "streamed"},
+		{"/abort", false, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req.Header.Set("Accept-Encoding", "gzip")
+			r.ServeHTTP(w, req)
+
+			if gotGzip := w.Header().Get("Content-Encoding") == "gzip"; gotGzip != tt.wantGzip {
+				t.Fatalf("Content-Encoding gzip = %v, want %v", gotGzip, tt.wantGzip)
+			}
+
+			body := w.Body.String()
+			if tt.wantGzip {
+				zr, err := gzip.NewReader(w.Body)
+				if err != nil {
+					t.Fatalf("gzip.NewReader() error = %v (body not compressed though headers say so)", err)
+				}
+
+				b, _ := io.ReadAll(zr)
+				body = string(b)
+			}
+
+			if body != tt.wantBody {
+				t.Fatalf("body = %q, want %q", body, tt.wantBody)
+			}
+		})
+	}
+}

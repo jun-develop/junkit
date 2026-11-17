@@ -15,6 +15,7 @@ func sqlEntry(name, query, bound, errMsg string) LogEntry {
 	return LogEntry{Type: TypeSQL, Label: name, DurationMS: 1, Data: data}
 }
 
+// TestSummarizeDB_GroupsBySQLNotName checks repeated queries are grouped by SQL rather than label.
 func TestSummarizeDB_GroupsBySQLNotName(t *testing.T) {
 	entries := []LogEntry{
 		// Two different unannotated queries share the guessed name "Select".
@@ -40,6 +41,7 @@ func TestSummarizeDB_GroupsBySQLNotName(t *testing.T) {
 	}
 }
 
+// TestRenderHTML_HighlightsFailedQuery checks the failed-query error block.
 func TestRenderHTML_HighlightsFailedQuery(t *testing.T) {
 	d := New()
 	d.Append(sqlEntry("CreateUser", "INSERT INTO users VALUES ($1)", "INSERT INTO users VALUES ('jane')", "duplicate key"))

@@ -10,8 +10,9 @@ import (
 	"github.com/jun-develop/junkit/tracer"
 )
 
+// TestServerInfo_MasksSecretsAndReportsRequestDetails checks details and masking.
 func TestServerInfo_MasksSecretsAndReportsRequestDetails(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/users/1?foo=bar", nil)
+	r := httptest.NewRequest(http.MethodGet, "/users/1?foo=bar&token=abc", nil)
 	r.Host = "api.example.com:8080"
 	r.Header.Set("Authorization", "Bearer abcdefghijklmnopqrstuvwxyz")
 	r.Header.Set("Cookie", "session=super-secret; theme=dark")
@@ -28,8 +29,12 @@ func TestServerInfo_MasksSecretsAndReportsRequestDetails(t *testing.T) {
 		t.Errorf(`info["path"] = %v, want %q`, info["path"], "/users/1")
 	}
 
-	if info["query_string"] != "foo=bar" {
-		t.Errorf(`info["query_string"] = %v, want %q`, info["query_string"], "foo=bar")
+	if info["query_string"] != "foo=bar&token=****" {
+		t.Errorf(`info["query_string"] = %v, want %q`, info["query_string"], "foo=bar&token=****")
+	}
+
+	if want := "http://api.example.com:8080/users/1?foo=bar&token=****"; info["full_url"] != want {
+		t.Errorf(`info["full_url"] = %v, want %q`, info["full_url"], want)
 	}
 
 	if info["host"] != "api.example.com" || info["host_port"] != "8080" {
@@ -55,6 +60,7 @@ func TestServerInfo_MasksSecretsAndReportsRequestDetails(t *testing.T) {
 	}
 }
 
+// TestSplitHostPort checks splitHostPort with and without a port.
 func TestSplitHostPort(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -84,10 +90,12 @@ func TestSplitHostPort(t *testing.T) {
 	}
 }
 
+// TestHTTPInfo checks HTTPInfo records one info entry and is a no-op without a Debugger.
 func TestHTTPInfo(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	tracer.HTTPInfo(r.Context(), r) // no Debugger: must not panic
+	// No Debugger: must not panic.
+	tracer.HTTPInfo(r.Context(), r)
 
 	d := tracer.New()
 	tracer.HTTPInfo(tracer.WithContext(r.Context(), d), r)
@@ -98,10 +106,15 @@ func TestHTTPInfo(t *testing.T) {
 	}
 }
 
+// TestHTTPInfo_GinContextUsesClientIP checks trusted-proxy handling.
 func TestHTTPInfo_GinContextUsesClientIP(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, engine := gin.CreateTestContext(httptest.NewRecorder())
-	_ = engine.SetTrustedProxies(nil) // no trusted proxy: the spoofed headers must be ignored
+	// No trusted proxy: the spoofed headers must be ignored.
+	if err := engine.SetTrustedProxies(nil); err != nil {
+		t.Fatal(err)
+	}
+
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
 	c.Request.Header.Set("X-Real-IP", "6.6.6.6")
 	c.Request.Header.Set("X-Forwarded-For", "6.6.6.6")

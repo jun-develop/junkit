@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/mail"
+	"net/url"
 )
 
 // brevoEndpoint is Brevo's transactional send API.
@@ -27,19 +29,27 @@ func newBrevoSender(from string, opts BrevoOptions, httpClient *http.Client) (*b
 		return nil, fmt.Errorf("mailer: brevo api key is required")
 	}
 
-	return &brevoSender{from: from, apiKey: opts.APIKey, endpoint: brevoEndpoint, httpClient: httpClient}, nil
+	return &brevoSender{
+		from:       from,
+		apiKey:     opts.APIKey,
+		endpoint:   brevoEndpoint,
+		httpClient: httpClient,
+	}, nil
 }
 
+// brevoContact is a Brevo sender or recipient.
 type brevoContact struct {
 	Email string `json:"email"`
 	Name  string `json:"name,omitempty"`
 }
 
+// brevoAttachment is a Brevo attachment.
 type brevoAttachment struct {
 	Name    string `json:"name"`
-	Content []byte `json:"content"` // encoding/json base64-encodes []byte, which Brevo expects
+	Content []byte `json:"content"`
 }
 
+// brevoRequest is the Brevo send-email request body.
 type brevoRequest struct {
 	Sender      brevoContact      `json:"sender"`
 	To          []brevoContact    `json:"to,omitempty"`
@@ -75,7 +85,8 @@ func (s *brevoSender) Send(ctx context.Context, msg Message) error {
 	}
 
 	for _, a := range msg.Attachments {
-		reqBody.Attachment = append(reqBody.Attachment, brevoAttachment{Name: a.Filename, Content: a.Data})
+		reqBody.Attachment = append(reqBody.Attachment,
+			brevoAttachment{Name: a.Filename, Content: a.Data})
 	}
 
 	payload, err := json.Marshal(reqBody)
@@ -94,6 +105,11 @@ func (s *brevoSender) Send(ctx context.Context, msg Message) error {
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+
 		return fmt.Errorf("mailer: brevo request: %w", err)
 	}
 
@@ -101,16 +117,19 @@ func (s *brevoSender) Send(ctx context.Context, msg Message) error {
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+
 		return fmt.Errorf("mailer: brevo api error (status %d): %s", resp.StatusCode, body)
 	}
 
 	return nil
 }
 
+// toBrevo converts a parsed address to a brevoContact.
 func toBrevo(a *mail.Address) brevoContact {
 	return brevoContact{Email: a.Address, Name: a.Name}
 }
 
+// toBrevoList converts parsed addresses to brevoContacts.
 func toBrevoList(list []*mail.Address) []brevoContact {
 	out := make([]brevoContact, 0, len(list))
 	for _, a := range list {

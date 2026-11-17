@@ -2,9 +2,7 @@ package middleware
 
 import (
 	"fmt"
-	"net/http"
 	"runtime/debug"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -21,13 +19,14 @@ type RecoverOptions struct {
 	Debug TracerDebugOptions
 }
 
-// Recover creates a Gin middleware that catches panics, logs stack traces, sends error
-// notifications and returns HTTP 500. tracer.BreakpointSignal panics are re-panicked.
+// Recover creates a Gin middleware that catches panics, logs stack traces, returns HTTP 500 and then
+// queues an error report on notifier (which may be nil). tracer.BreakpointSignal panics are
+// re-panicked.
 //
 // Usage:
 //
-//	router.Use(middleware.Recover(zapLogger, notifier, responder, middleware.RecoverOptions{}))
-func Recover(logger *zap.Logger, notifier notification.Notifier, responder response.Responder, opts RecoverOptions) gin.HandlerFunc {
+//	router.Use(middleware.Recover(middleware.RecoverOptions{}, zapLogger, notifier, responder))
+func Recover(opts RecoverOptions, logger *zap.Logger, notifier notification.Notifier, responder response.Responder) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			r := recover()
@@ -40,7 +39,7 @@ func Recover(logger *zap.Logger, notifier notification.Notifier, responder respo
 			}
 
 			if opts.Debug.Matches(c) {
-				tracer.E(c.Request.Context(), "PANIC RECOVERED", r)
+				tracer.Error(c.Request.Context(), "PANIC RECOVERED", r)
 				return
 			}
 
@@ -51,7 +50,8 @@ func Recover(logger *zap.Logger, notifier notification.Notifier, responder respo
 	}
 }
 
-// handlePanic logs and reports a recovered panic, then aborts with a 500 response.
+// handlePanic logs a recovered panic, aborts with a 500 response and then reports it, so the client
+// is answered before the report is built.
 func handlePanic(c *gin.Context, logger *zap.Logger, notifier notification.Notifier, responder response.Responder, r any) {
 	file, line, fn := tracer.FindErrorOrigin()
 	stack := debug.Stack()
@@ -64,18 +64,18 @@ func handlePanic(c *gin.Context, logger *zap.Logger, notifier notification.Notif
 		zap.ByteString("stack", stack),
 	)
 
-	errorData := map[string]any{
-		"error":     fmt.Sprintf("%v", r),
-		"location":  file,
-		"line":      line,
-		"function":  fn,
-		"stack":     string(stack),
-		"timestamp": time.Now().Format(time.RFC3339Nano),
-	}
-	if notifier != nil {
-		notifier.SendErrorNotification(c, errorData, http.StatusInternalServerError)
-	}
-
 	responder.Error(c, response.ErrInternalServer)
 	c.Abort()
+
+	if notifier != nil {
+		notifier.ReportError(c.Request.Context(), c.Request, notification.ErrorReport{
+			Error:      fmt.Sprintf("%v", r),
+			Location:   file,
+			Line:       line,
+			Function:   fn,
+			Stack:      string(stack),
+			StatusCode: c.Writer.Status(),
+			ClientIP:   c.ClientIP(),
+		})
+	}
 }

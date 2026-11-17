@@ -1,16 +1,22 @@
 package httpclient
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"math/rand"
 	"net/http"
+	"strconv"
 	"time"
 )
 
-// retryTransport wraps an http.RoundTripper to automatically retry failed requests
-// (network errors, HTTP 429, and 5xx responses) with exponential backoff and jitter.
+// maxDrainBytes caps how much of a discarded response is read so its connection can be reused;
+// larger bodies are closed instead, which is cheaper than reading them.
+const maxDrainBytes = 4 << 10
+
+// retryTransport wraps an http.RoundTripper to retry transient failures (network errors, HTTP
+// 429 and 5xx) with exponential backoff and jitter. Only requests that are safe to replay are
+// retried: idempotent methods, or any method carrying an Idempotency-Key header, and only when the
+// body is absent or replayable through GetBody.
 type retryTransport struct {
 	base       http.RoundTripper
 	maxRetries int
@@ -18,82 +24,130 @@ type retryTransport struct {
 	waitMax    time.Duration
 }
 
-// RoundTrip implements http.RoundTripper; transient failures are retried up to maxRetries times.
+// RoundTrip implements http.RoundTripper. It never modifies req: each retry sends a clone with a
+// fresh body from req.GetBody.
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	bodyBytes, err := drainBody(req)
+	if !replayable(req) {
+		return t.base.RoundTrip(req)
+	}
+
+	attemptReq := req
+	for attempt := 0; ; attempt++ {
+		resp, err := t.base.RoundTrip(attemptReq)
+		if attempt >= t.maxRetries || !shouldRetry(resp, err) {
+			return resp, err
+		}
+
+		wait := t.delay(attempt, resp)
+		if resp != nil {
+			drainAndClose(resp.Body)
+		}
+
+		if err := sleepWithContext(req.Context(), wait); err != nil {
+			return nil, err
+		}
+
+		attemptReq, err = cloneWithBody(req)
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+// CloseIdleConnections forwards to the base transport so http.Client.CloseIdleConnections works
+// through the retry wrapper.
+func (t *retryTransport) CloseIdleConnections() {
+	if c, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
+	}
+}
+
+// replayable reports whether req may be sent more than once.
+func replayable(req *http.Request) bool {
+	if req.Body != nil && req.Body != http.NoBody && req.GetBody == nil {
+		return false
+	}
+
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace,
+		http.MethodPut, http.MethodDelete:
+		return true
+	}
+
+	return req.Header.Get("Idempotency-Key") != ""
+}
+
+// cloneWithBody returns a copy of req with a fresh body for the next attempt.
+func cloneWithBody(req *http.Request) (*http.Request, error) {
+	clone := req.Clone(req.Context())
+	if req.GetBody == nil {
+		return clone, nil
+	}
+
+	body, err := req.GetBody()
 	if err != nil {
 		return nil, err
 	}
 
-	var resp *http.Response
-	for attempt := 0; ; attempt++ {
-		if attempt > 0 {
-			resetBody(req, bodyBytes)
-		}
+	clone.Body = body
 
-		resp, err = t.base.RoundTrip(req)
-		if !t.shouldRetry(resp, err) || attempt >= t.maxRetries {
-			return resp, err
-		}
-
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-
-		if waitErr := sleepWithContext(req.Context(), t.backoff(attempt)); waitErr != nil {
-			return nil, waitErr
-		}
-	}
+	return clone, nil
 }
 
 // shouldRetry reports whether a network error, 429 or 5xx response should be retried.
-func (t *retryTransport) shouldRetry(resp *http.Response, err error) bool {
+func shouldRetry(resp *http.Response, err error) bool {
 	if err != nil {
 		return true
 	}
 
-	return resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError
+	return resp.StatusCode == http.StatusTooManyRequests ||
+		resp.StatusCode >= http.StatusInternalServerError
 }
 
-// backoff calculates the delay before the next retry using exponential backoff with jitter.
-func (t *retryTransport) backoff(attempt int) time.Duration {
+// delay returns the wait before the next attempt: the server's Retry-After when present,
+// otherwise exponential backoff with jitter; either way capped at waitMax.
+func (t *retryTransport) delay(attempt int, resp *http.Response) time.Duration {
+	if d, ok := retryAfter(resp); ok {
+		return min(d, t.waitMax)
+	}
+
 	wait := t.waitMin << attempt
 	if wait <= 0 || wait > t.waitMax {
 		wait = t.waitMax
 	}
 
-	jitter := time.Duration(rand.Int63n(int64(wait)/5 + 1))
+	wait += time.Duration(rand.Int63n(int64(wait)/5 + 1))
 
-	return wait + jitter
+	return min(wait, t.waitMax)
 }
 
-// drainBody reads and buffers req.Body into memory so it can be reused across retries.
-func drainBody(req *http.Request) ([]byte, error) {
-	if req.Body == nil {
-		return nil, nil
+// retryAfter parses a Retry-After header given in seconds or as an HTTP date.
+func retryAfter(resp *http.Response) (time.Duration, bool) {
+	if resp == nil {
+		return 0, false
 	}
 
-	b, err := io.ReadAll(req.Body)
-	_ = req.Body.Close()
-	if err != nil {
-		return nil, err
+	v := resp.Header.Get("Retry-After")
+	if v == "" {
+		return 0, false
 	}
 
-	resetBody(req, b)
+	if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second, true
+	}
 
-	return b, nil
+	if at, err := http.ParseTime(v); err == nil {
+		return max(time.Until(at), 0), true
+	}
+
+	return 0, false
 }
 
-// resetBody resets req.Body with the buffered bytes for the next retry attempt.
-func resetBody(req *http.Request, body []byte) {
-	if body == nil {
-		return
-	}
-
-	req.Body = io.NopCloser(bytes.NewReader(body))
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(body)), nil
-	}
+// drainAndClose reads a little of body so the connection can be reused, then closes it.
+func drainAndClose(body io.ReadCloser) {
+	// Best effort: a failed drain only costs connection reuse.
+	_, _ = io.CopyN(io.Discard, body, maxDrainBytes)
+	_ = body.Close()
 }
 
 // sleepWithContext waits for d, returning ctx.Err() early if ctx is done first.

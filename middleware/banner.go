@@ -1,8 +1,6 @@
 package middleware
 
 import (
-	"fmt"
-	"html"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -31,7 +29,8 @@ var (
 		// Dotfiles and secrets: /.env.example, /api/.git/config, /.aws/credentials.
 		`/\.(env|git|svn|hg|bzr|aws|ssh|docker|kube|npmrc|pypirc|netrc|bash_history|zsh_history|mysql_history|`+
 			`htaccess|htpasswd|ds_store|idea|vscode|terraform|circleci|travis|gitlab-ci|sentryclirc|vault-token)`,
-		`\.env(\.|/|$)`, // /production.env, /app.env.bak
+		// /production.env, /app.env.bak.
+		`\.env(\.|/|$)`,
 		`/id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$`,
 		// File types a Go API never serves: PHP/ASP/Java/CGI pages, dumps and editor backups.
 		`\.(php\d?|phtml|phar|aspx?|ashx|asmx|axd|jspx?|do|action|cgi|pl|sql|sqlite3?|mdb|bak|old|orig|swp)(/|$)`,
@@ -45,10 +44,10 @@ var (
 		`\.\./`, `\.\.\\`, `/etc/(passwd|shadow|hosts)`, `/proc/self`, `win\.ini`, `boot\.ini`, `web-inf`, `meta-inf`,
 	)
 
-	// DefaultAttackPatterns match injection payloads in the URL-decoded query, and in the path of a
-	// request that matched no route.
+	// DefaultAttackPatterns match injection payloads in the path or URL-decoded query of a request
+	// that matched no route.
 	DefaultAttackPatterns = patterns(
-		`\$\{(jndi|env|sys|java|lower|upper|::-)`, // Log4Shell
+		`\$\{(jndi|env|sys|java|lower|upper|::-)`,
 		`<script`, `javascript:`, `onerror\s*=`, `onload\s*=`,
 		`union(\s|\+|/\*.*\*/)+(all(\s|\+)+)?select`, `information_schema`, `sleep\(\s*\d`, `benchmark\(`,
 		`waitfor\s+delay`, `pg_sleep`,
@@ -101,9 +100,10 @@ type BannerOptions struct {
 	// path one of them matches. Defaults to DefaultTrapPaths when nil.
 	TrapPaths []*regexp.Regexp
 
-	// AttackPatterns ban a client on the first request whose lowercased, URL-decoded query (and
-	// path, when it matched no route) one of them matches. Defaults to DefaultAttackPatterns when
-	// nil. Request bodies are not checked.
+	// AttackPatterns ban a client on the first request that matched no route and whose lowercased
+	// path or URL-decoded query one of them matches. Defaults to DefaultAttackPatterns when nil.
+	// Real routes are not checked: their queries carry user input such as search terms. Request
+	// bodies are not checked.
 	AttackPatterns []*regexp.Regexp
 
 	// ScannerAgents ban a client on the first request whose lowercased User-Agent one of them
@@ -128,15 +128,42 @@ type BannerOptions struct {
 	IPWhitelist []string
 }
 
+// withDefaults fills nil pattern and status lists with the package defaults.
+func (o BannerOptions) withDefaults() BannerOptions {
+	if o.TrapPaths == nil {
+		o.TrapPaths = DefaultTrapPaths
+	}
+
+	if o.AttackPatterns == nil {
+		o.AttackPatterns = DefaultAttackPatterns
+	}
+
+	if o.ScannerAgents == nil {
+		o.ScannerAgents = DefaultScannerAgents
+	}
+
+	if o.StrikeStatuses == nil {
+		o.StrikeStatuses = DefaultStrikeStatuses
+	}
+
+	return o
+}
+
 // Banner creates a Gin middleware that bans clients probing the API: a request to a trap path
 // bans at once, and MaxStrikes responses with a strike status within StrikeWindow ban too.
 // A banned client gets 403 with Retry-After until the ban ends. Place it before Limiter, so
 // banned requests skip it and its 429s count as strikes.
 //
+// A browser's cross-site no-cors request (an <img> or <script> another site embeds) never bans or
+// strikes, so a third-party page cannot get its visitors banned; only its User-Agent is checked.
+// Clients are keyed by c.ClientIP(), so the engine's trusted proxies must be set correctly, or one
+// proxy's address bans everyone behind it. It panics without Cache, MaxStrikes, StrikeWindow or
+// BanDurations.
+//
 // Usage:
 //
 //	router.Use(middleware.Banner(middleware.BannerOptions{
-//	    Cache: cache.New[int64](cacheOpts), MaxStrikes: 30, StrikeWindow: time.Minute,
+//	    Cache: cache.New[int64](s.OrMemory()), MaxStrikes: 30, StrikeWindow: time.Minute,
 //	    BanDurations: []time.Duration{15 * time.Minute, time.Hour, 24 * time.Hour},
 //	}, zapLogger, responder, notifier), middleware.Limiter(...))
 func Banner(opts BannerOptions, logger *zap.Logger, responder response.Responder, notifier notification.Notifier) gin.HandlerFunc {
@@ -144,54 +171,36 @@ func Banner(opts BannerOptions, logger *zap.Logger, responder response.Responder
 		panic("middleware: Banner requires Cache, MaxStrikes > 0, StrikeWindow > 0 and BanDurations")
 	}
 
-	if opts.TrapPaths == nil {
-		opts.TrapPaths = DefaultTrapPaths
-	}
-
-	if opts.AttackPatterns == nil {
-		opts.AttackPatterns = DefaultAttackPatterns
-	}
-
-	if opts.ScannerAgents == nil {
-		opts.ScannerAgents = DefaultScannerAgents
-	}
-
-	if opts.StrikeStatuses == nil {
-		opts.StrikeStatuses = DefaultStrikeStatuses
-	}
-
-	whitelist := make(map[string]struct{}, len(opts.IPWhitelist))
-	for _, ip := range opts.IPWhitelist {
-		whitelist[ip] = struct{}{}
-	}
-
+	opts = opts.withDefaults()
+	whitelist := toSet(opts.IPWhitelist)
 	b := &banner{opts: opts, logger: logger, notifier: notifier, historyTTL: 2 * slices.Max(opts.BanDurations)}
 
-	return func(ctx *gin.Context) {
-		ip := ctx.ClientIP()
+	return func(c *gin.Context) {
+		ip := c.ClientIP()
 		if _, ok := whitelist[ip]; ok {
-			ctx.Next()
+			c.Next()
 			return
 		}
 
 		key := security.ClientKey(ip)
-		if until, ok := opts.Cache.Get(ctx, banKey(key)); ok {
-			deny(ctx, responder, until)
+		if until, ok := opts.Cache.Get(c, banKey(key)); ok {
+			deny(c, responder, until)
 			return
 		}
 
-		if reason := trapped(ctx, opts); reason != "" {
-			deny(ctx, responder, b.ban(ctx, ip, key, reason))
+		embedded := crossSiteNoCORS(c.Request)
+		if reason := trapped(c, opts, embedded); reason != "" {
+			deny(c, responder, b.ban(c, ip, key, reason))
 			return
 		}
 
-		ctx.Next()
+		c.Next()
 
-		if !slices.Contains(opts.StrikeStatuses, ctx.Writer.Status()) {
+		if embedded || !slices.Contains(opts.StrikeStatuses, c.Writer.Status()) {
 			return
 		}
 
-		n, err := opts.Cache.Incr(ctx, strikeKey(key), opts.StrikeWindow)
+		n, err := opts.Cache.Incr(c, strikeKey(key), opts.StrikeWindow)
 		if err != nil {
 			logger.Error("middleware: banner strike count failed", zap.String("ip", ip), zap.Error(err))
 			return
@@ -199,27 +208,37 @@ func Banner(opts BannerOptions, logger *zap.Logger, responder response.Responder
 
 		// == bans once per window even when concurrent strikes pass the limit together.
 		if n == opts.MaxStrikes {
-			_ = opts.Cache.Delete(ctx, strikeKey(key))
-			b.ban(ctx, ip, key, strconv.FormatInt(n, 10)+" strikes")
+			if err := opts.Cache.Delete(c, strikeKey(key)); err != nil {
+				logger.Error("middleware: banner strike reset failed", zap.String("ip", ip), zap.Error(err))
+			}
+
+			b.ban(c, ip, key, strconv.FormatInt(n, 10)+" strikes")
 		}
 	}
 }
 
-// trapped returns why the request bans its client at once, or "" when it does not. A path that
-// matched a route is not checked: no real route is a trap, and the patterns cost far more on a
-// path than a route lookup does.
-func trapped(ctx *gin.Context, opts BannerOptions) string {
-	r := ctx.Request
+// crossSiteNoCORS reports whether r is a browser subresource load embedded by another site, which
+// its visitor did not choose to send.
+func crossSiteNoCORS(r *http.Request) bool {
+	return r.Header.Get("Sec-Fetch-Site") == "cross-site" && r.Header.Get("Sec-Fetch-Mode") == "no-cors"
+}
+
+// trapped returns why the request bans its client at once, or "" when it does not. Only the
+// User-Agent is checked for a request that matched a route or was embedded by another site: no
+// real route is a trap, and the patterns cost far more on a path than a route lookup does.
+func trapped(c *gin.Context, opts BannerOptions, embedded bool) string {
+	r := c.Request
 	if matchAny(opts.ScannerAgents, strings.ToLower(r.UserAgent())) {
 		return "scanner user agent"
 	}
 
-	var target string
-	if ctx.FullPath() == "" {
-		target = strings.ToLower(r.URL.Path)
-		if matchAny(opts.TrapPaths, target) {
-			return "trap path"
-		}
+	if embedded || c.FullPath() != "" {
+		return ""
+	}
+
+	target := strings.ToLower(r.URL.Path)
+	if matchAny(opts.TrapPaths, target) {
+		return "trap path"
 	}
 
 	if r.URL.RawQuery != "" {
@@ -231,7 +250,7 @@ func trapped(ctx *gin.Context, opts BannerOptions) string {
 		target += "?" + strings.ToLower(query)
 	}
 
-	if target != "" && matchAny(opts.AttackPatterns, target) {
+	if matchAny(opts.AttackPatterns, target) {
 		return "attack payload"
 	}
 
@@ -247,15 +266,15 @@ type banner struct {
 }
 
 // ban bans key for its next ban duration and returns when the ban ends (Unix seconds).
-func (b *banner) ban(ctx *gin.Context, ip, key, reason string) int64 {
-	level, err := b.opts.Cache.Incr(ctx, levelKey(key), b.historyTTL)
+func (b *banner) ban(c *gin.Context, ip, key, reason string) int64 {
+	level, err := b.opts.Cache.Incr(c, levelKey(key), b.historyTTL)
 	if err != nil || level < 1 {
 		level = 1
 	}
 
 	d := b.opts.BanDurations[min(int(level), len(b.opts.BanDurations))-1]
 	until := time.Now().Add(d).Unix()
-	if err := b.opts.Cache.Set(ctx, banKey(key), until, d); err != nil {
+	if err := b.opts.Cache.Set(c, banKey(key), until, d); err != nil {
 		b.logger.Error("middleware: banner ban failed", zap.String("ip", ip), zap.Error(err))
 	}
 
@@ -263,26 +282,24 @@ func (b *banner) ban(ctx *gin.Context, ip, key, reason string) int64 {
 		zap.String("ip", ip),
 		zap.String("blocked", key),
 		zap.String("reason", reason),
-		zap.String("path", ctx.Request.URL.Path),
+		zap.String("path", c.Request.URL.Path),
 		zap.Duration("duration", d),
 	)
 
-	if b.notifier != nil {
-		msg := banAlertMessage(ctx, ip, key, reason, d)
-		go b.notifier.SendMessageHTML(ctx.Copy(), msg, "error")
-	}
+	sendAlert(c, b.notifier, "⛔ <b>Client Banned</b>",
+		"IP", ip, "Blocked", key, "Reason", reason, "Duration", d.String())
 
 	return until
 }
 
 // deny aborts with 403 and a Retry-After header for a ban ending at until (Unix seconds).
-func deny(ctx *gin.Context, responder response.Responder, until int64) {
+func deny(c *gin.Context, responder response.Responder, until int64) {
 	if wait := until - time.Now().Unix(); wait > 0 {
-		ctx.Header("Retry-After", strconv.FormatInt(wait, 10))
+		c.Header("Retry-After", strconv.FormatInt(wait, 10))
 	}
 
-	responder.Send(ctx, http.StatusForbidden, "access_denied")
-	ctx.Abort()
+	responder.Send(c, http.StatusForbidden, "access_denied")
+	c.Abort()
 }
 
 // banKey returns the cache key of a client's ban.
@@ -298,28 +315,4 @@ func strikeKey(key string) string {
 // levelKey returns the cache key of a client's ban count.
 func levelKey(key string) string {
 	return "banner:level:" + key
-}
-
-// banAlertMessage formats an HTML alert for a new ban; request values are escaped since Telegram
-// rejects (and so drops) messages with stray markup.
-func banAlertMessage(ctx *gin.Context, ip, key, reason string, d time.Duration) string {
-	return fmt.Sprintf(`
-	⛔ <b>Client Banned</b>
-
-	<b>Request Info</b>
-	• <b>IP:</b> <code>%s</code> (blocked: <code>%s</code>)
-	• <b>Reason:</b> %s
-	• <b>Method:</b> <code>%s</code>
-	• <b>Path:</b> <code>%s</code>
-	• <b>Duration:</b> <code>%s</code>
-	• <b>Time:</b> <code>%s</code>
-	`,
-		html.EscapeString(ip),
-		html.EscapeString(key),
-		html.EscapeString(reason),
-		html.EscapeString(ctx.Request.Method),
-		html.EscapeString(ctx.Request.URL.Path),
-		d,
-		time.Now().Format(time.RFC3339),
-	)
 }

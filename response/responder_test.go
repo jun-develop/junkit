@@ -2,6 +2,7 @@ package response_test
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,10 +11,12 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/jun-develop/junkit/i18n"
+	"github.com/jun-develop/junkit/logger"
 	"github.com/jun-develop/junkit/pagination"
 	"github.com/jun-develop/junkit/response"
 )
 
+// newResponderTestContext returns a recorder and a gin test context with a GET / request.
 func newResponderTestContext() (*httptest.ResponseRecorder, *gin.Context) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
@@ -23,8 +26,10 @@ func newResponderTestContext() (*httptest.ResponseRecorder, *gin.Context) {
 	return w, c
 }
 
+// decodeResponse unmarshals the recorded body into a response.Response.
 func decodeResponse(t *testing.T, w *httptest.ResponseRecorder) response.Response {
 	t.Helper()
+
 	var res response.Response
 	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
 		t.Fatalf("failed to decode response body %q: %v", w.Body.String(), err)
@@ -35,7 +40,7 @@ func decodeResponse(t *testing.T, w *httptest.ResponseRecorder) response.Respons
 
 func TestResponder_Send(t *testing.T) {
 	translator := i18n.NewTranslator()
-	responder := response.NewResponder(response.Options{Language: "en"}, translator)
+	responder := response.NewResponder(translator)
 	w, c := newResponderTestContext()
 
 	responder.Send(c, http.StatusOK, "operation_successful")
@@ -60,7 +65,7 @@ func TestResponder_Send(t *testing.T) {
 
 func TestResponder_SendWithData_RoutesByStatusCode(t *testing.T) {
 	translator := i18n.NewTranslator()
-	responder := response.NewResponder(response.Options{Language: "en"}, translator)
+	responder := response.NewResponder(translator)
 
 	t.Run("success status uses the data field", func(t *testing.T) {
 		w, c := newResponderTestContext()
@@ -93,7 +98,7 @@ func TestResponder_SendWithData_RoutesByStatusCode(t *testing.T) {
 
 func TestResponder_Pagination(t *testing.T) {
 	translator := i18n.NewTranslator()
-	responder := response.NewResponder(response.Options{Language: "en"}, translator)
+	responder := response.NewResponder(translator)
 	w, c := newResponderTestContext()
 
 	meta := pagination.NewPagination(1, 10, 25)
@@ -123,7 +128,7 @@ func TestResponder_Translate(t *testing.T) {
 	translator.AddTranslations(map[string]map[string]string{
 		i18n.LangEN: {"greeting": "Hello, %s!"},
 	})
-	responder := response.NewResponder(response.Options{Language: "en"}, translator)
+	responder := response.NewResponder(translator)
 
 	if got := responder.Translate("greeting", "Jane"); got != "Hello, Jane!" {
 		t.Fatalf("Translate() = %q, want %q", got, "Hello, Jane!")
@@ -135,7 +140,7 @@ func TestResponder_Error_AppError(t *testing.T) {
 	translator.AddTranslations(map[string]map[string]string{
 		i18n.LangEN: {"user_not_found": "User not found"},
 	})
-	responder := response.NewResponder(response.Options{Language: "en"}, translator)
+	responder := response.NewResponder(translator)
 	w, c := newResponderTestContext()
 
 	responder.Error(c, response.New(response.NotFound, "user_not_found"))
@@ -156,7 +161,7 @@ func TestResponder_Error_AppError(t *testing.T) {
 
 func TestResponder_Error_OrdinaryErrorBecomesGeneric500(t *testing.T) {
 	translator := i18n.NewTranslator()
-	responder := response.NewResponder(response.Options{Language: "en"}, translator)
+	responder := response.NewResponder(translator)
 	w, c := newResponderTestContext()
 
 	responder.Error(c, errors500Sentinel)
@@ -171,7 +176,7 @@ func TestResponder_Error_OrdinaryErrorBecomesGeneric500(t *testing.T) {
 }
 
 func TestResponder_Error_NilBecomesGeneric500(t *testing.T) {
-	responder := response.NewResponder(response.Options{Language: "en"}, i18n.NewTranslator())
+	responder := response.NewResponder(i18n.NewTranslator())
 	w, c := newResponderTestContext()
 
 	responder.Error(c, nil)
@@ -183,9 +188,55 @@ func TestResponder_Error_NilBecomesGeneric500(t *testing.T) {
 
 var errors500Sentinel = &fakeError{"a plain, unstructured error"}
 
+// fakeError is a plain error that is not an *AppError.
 type fakeError struct{ msg string }
 
+// Error implements error.
 func (e *fakeError) Error() string { return e.msg }
+
+func TestResponder_Error_RecordsAppErrorsWorthLogging(t *testing.T) {
+	cause := errors.New("connection refused")
+
+	tests := []struct {
+		name       string
+		err        error
+		wantErrors int
+	}{
+		{"4xx without cause is not recorded", response.New(response.NotFound, "k"), 0},
+		{"4xx with cause is recorded", response.Wrap(response.Conflict, "k", cause), 1},
+		{"5xx without cause is recorded", response.New(response.Internal, "k"), 1},
+		{"5xx with cause is recorded", response.Wrap(response.Internal, "k", cause), 1},
+	}
+
+	responder := response.NewResponder(i18n.NewTranslator())
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, c := newResponderTestContext()
+			responder.Error(c, tt.err)
+
+			if len(c.Errors) != tt.wantErrors {
+				t.Fatalf("gin context Errors = %v, want %d recorded", c.Errors, tt.wantErrors)
+			}
+
+			if tt.wantErrors > 0 && !errors.Is(c.Errors[0].Err, tt.err) {
+				t.Fatalf("recorded %v, want %v", c.Errors[0].Err, tt.err)
+			}
+		})
+	}
+}
+
+func TestResponder_UsesTranslatorDefaultLanguage(t *testing.T) {
+	translator := i18n.NewTranslator()
+	translator.AddTranslations(map[string]map[string]string{
+		i18n.LangVI: {"operation_successful": "Thành công"},
+	})
+	translator.SetDefaultLang(i18n.LangVI)
+
+	if got := response.NewResponder(translator).Translate("operation_successful"); got != "Thành công" {
+		t.Fatalf("Translate() = %q, want the default-language message", got)
+	}
+}
 
 func TestResponder_Error_MapsEveryErrorCode(t *testing.T) {
 	tests := []struct {
@@ -207,7 +258,7 @@ func TestResponder_Error_MapsEveryErrorCode(t *testing.T) {
 	}
 
 	translator := i18n.NewTranslator()
-	responder := response.NewResponder(response.Options{Language: "en"}, translator)
+	responder := response.NewResponder(translator)
 
 	for _, tt := range tests {
 		t.Run(string(tt.code), func(t *testing.T) {
@@ -221,12 +272,12 @@ func TestResponder_Error_MapsEveryErrorCode(t *testing.T) {
 	}
 }
 
-func TestGetAPIInfo_ReadsTraceMiddlewareContext(t *testing.T) {
+func TestResponder_APIInfoReadsTraceMiddlewareContext(t *testing.T) {
 	translator := i18n.NewTranslator()
-	responder := response.NewResponder(response.Options{Language: "en"}, translator)
+	responder := response.NewResponder(translator)
 	w, c := newResponderTestContext()
 
-	c.Set(response.TraceIDContextKey, "trace-123")
+	c.Request = c.Request.WithContext(logger.WithTraceID(c.Request.Context(), "trace-123"))
 	c.Set(response.VersionContextKey, "v1.2.3")
 	c.Set(response.EnvContextKey, "production")
 	c.Set(response.StartTimeContextKey, time.Now().Add(-50*time.Millisecond))
@@ -252,7 +303,7 @@ func TestGetAPIInfo_ReadsTraceMiddlewareContext(t *testing.T) {
 }
 
 func TestResponder_EveryErrorResponseHasACode(t *testing.T) {
-	responder := response.NewResponder(response.Options{Language: "en"}, i18n.NewTranslator())
+	responder := response.NewResponder(i18n.NewTranslator())
 
 	tests := []struct {
 		name   string

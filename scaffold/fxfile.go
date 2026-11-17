@@ -1,17 +1,16 @@
 package scaffold
 
 import (
+	"fmt"
 	"os"
 	"strings"
-
-	"github.com/jun-develop/junkit/console"
 )
 
 // addImportLine inserts importPath into the import block of path.
 func addImportLine(path, importPath, module string) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return console.NewError("read %s: %w", path, err)
+		return fmt.Errorf("read %s: %w", path, err)
 	}
 
 	lines := strings.Split(string(content), "\n")
@@ -24,7 +23,8 @@ func addImportLine(path, importPath, module string) error {
 	}
 
 	if anchor == -1 {
-		return console.NewError("no existing %q import found in %s to anchor the new import next to", module, path)
+		return fmt.Errorf("no existing %q import found in %s to anchor the new import next to",
+			module, path)
 	}
 
 	out := make([]string, 0, len(lines)+1)
@@ -44,7 +44,7 @@ func removeImportLine(path, importPath string) error {
 func addModuleLine(path, marker, moduleLine string) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return console.NewError("read %s: %w", path, err)
+		return fmt.Errorf("read %s: %w", path, err)
 	}
 
 	lines := strings.Split(string(content), "\n")
@@ -58,7 +58,7 @@ func addModuleLine(path, marker, moduleLine string) error {
 	}
 
 	if markerAt == -1 {
-		return console.NewError("marker %q not found in %s", marker, path)
+		return fmt.Errorf("marker %q not found in %s", marker, path)
 	}
 
 	insertAt := markerAt + 1
@@ -83,7 +83,7 @@ func removeModuleLine(path, moduleLine string) error {
 func filterLinesContaining(path, needle string) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return console.NewError("read %s: %w", path, err)
+		return fmt.Errorf("read %s: %w", path, err)
 	}
 
 	lines := strings.Split(string(content), "\n")

@@ -19,6 +19,7 @@ func ClientKey(ip string) string {
 		return addr.Unmap().String()
 	}
 
+	// Prefix fails only for bit counts beyond the address size, never for 64 on IPv6.
 	prefix, _ := addr.WithZone("").Prefix(64)
 
 	return prefix.String()

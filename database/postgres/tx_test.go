@@ -18,11 +18,13 @@ type fakeTx struct {
 	rolledBack bool
 }
 
+// Commit records the commit and returns commitErr.
 func (f *fakeTx) Commit(context.Context) error {
 	f.committed = true
 	return f.commitErr
 }
 
+// Rollback records the rollback.
 func (f *fakeTx) Rollback(context.Context) error {
 	f.rolledBack = true
 	return nil
@@ -35,6 +37,7 @@ type fakePool struct {
 	beginErr error
 }
 
+// Begin returns tx, or beginErr when set.
 func (f *fakePool) Begin(context.Context) (pgx.Tx, error) {
 	if f.beginErr != nil {
 		return nil, f.beginErr
@@ -43,10 +46,10 @@ func (f *fakePool) Begin(context.Context) (pgx.Tx, error) {
 	return f.tx, nil
 }
 
-func TestDB_Executor(t *testing.T) {
+func TestDB_ExecutorPicksPoolOrTx(t *testing.T) {
 	t.Run("returns the pool outside a transaction", func(t *testing.T) {
 		pool := &fakePool{}
-		db := postgres.NewDB(pool)
+		db := postgres.FromPool(pool)
 
 		if got := db.Executor(context.Background()); got != pool {
 			t.Fatalf("Executor() = %v, want the pool", got)
@@ -54,9 +57,9 @@ func TestDB_Executor(t *testing.T) {
 	})
 
 	t.Run("ignores a transaction begun on another DB", func(t *testing.T) {
-		primary := postgres.NewDB(&fakePool{tx: &fakeTx{}})
+		primary := postgres.FromPool(&fakePool{tx: &fakeTx{}})
 		otherPool := &fakePool{}
-		other := postgres.NewDB(otherPool)
+		other := postgres.FromPool(otherPool)
 
 		err := primary.WithTransaction(context.Background(), func(txCtx context.Context) error {
 			if got := other.Executor(txCtx); got != otherPool {
@@ -71,10 +74,10 @@ func TestDB_Executor(t *testing.T) {
 	})
 }
 
-func TestDB_WithTransaction(t *testing.T) {
+func TestDB_WithTransactionCommitsOrRollsBack(t *testing.T) {
 	t.Run("commits on success", func(t *testing.T) {
 		tx := &fakeTx{}
-		db := postgres.NewDB(&fakePool{tx: tx})
+		db := postgres.FromPool(&fakePool{tx: tx})
 
 		err := db.WithTransaction(context.Background(), func(context.Context) error {
 			return nil
@@ -95,7 +98,7 @@ func TestDB_WithTransaction(t *testing.T) {
 
 	t.Run("rolls back when fn returns an error", func(t *testing.T) {
 		tx := &fakeTx{}
-		db := postgres.NewDB(&fakePool{tx: tx})
+		db := postgres.FromPool(&fakePool{tx: tx})
 		wantErr := errors.New("boom")
 
 		err := db.WithTransaction(context.Background(), func(context.Context) error {
@@ -117,7 +120,7 @@ func TestDB_WithTransaction(t *testing.T) {
 
 	t.Run("rolls back and re-panics when fn panics", func(t *testing.T) {
 		tx := &fakeTx{}
-		db := postgres.NewDB(&fakePool{tx: tx})
+		db := postgres.FromPool(&fakePool{tx: tx})
 
 		defer func() {
 			r := recover()
@@ -141,7 +144,7 @@ func TestDB_WithTransaction(t *testing.T) {
 
 	t.Run("propagates a begin error without touching the transaction", func(t *testing.T) {
 		beginErr := errors.New("connection refused")
-		db := postgres.NewDB(&fakePool{beginErr: beginErr})
+		db := postgres.FromPool(&fakePool{beginErr: beginErr})
 
 		err := db.WithTransaction(context.Background(), func(context.Context) error {
 			t.Fatal("fn should not run when Begin fails")
@@ -156,7 +159,7 @@ func TestDB_WithTransaction(t *testing.T) {
 	t.Run("wraps a commit error", func(t *testing.T) {
 		commitErr := errors.New("commit failed")
 		tx := &fakeTx{commitErr: commitErr}
-		db := postgres.NewDB(&fakePool{tx: tx})
+		db := postgres.FromPool(&fakePool{tx: tx})
 
 		err := db.WithTransaction(context.Background(), func(context.Context) error {
 			return nil
@@ -170,7 +173,7 @@ func TestDB_WithTransaction(t *testing.T) {
 	t.Run("a nested call joins the outer transaction", func(t *testing.T) {
 		tx := &fakeTx{}
 		pool := &fakePool{tx: tx}
-		db := postgres.NewDB(pool)
+		db := postgres.FromPool(pool)
 
 		err := db.WithTransaction(context.Background(), func(outerCtx context.Context) error {
 			pool.beginErr = errors.New("nested Begin must not be called")
@@ -198,7 +201,7 @@ func TestDB_WithTransaction(t *testing.T) {
 
 	t.Run("fn's context carries the active transaction", func(t *testing.T) {
 		tx := &fakeTx{}
-		db := postgres.NewDB(&fakePool{tx: tx})
+		db := postgres.FromPool(&fakePool{tx: tx})
 
 		err := db.WithTransaction(context.Background(), func(ctx context.Context) error {
 			if got := db.Executor(ctx); got != tx {

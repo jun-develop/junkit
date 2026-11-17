@@ -12,3 +12,12 @@ type Service interface {
 	UploadFile(ctx context.Context, file io.Reader, originalFilename string) (string, error)
 	DeleteFile(ctx context.Context, fileURL string) error
 }
+
+// Options configures local file storage.
+type Options struct {
+	// BaseDir is the local directory files are written to, e.g. "./uploads".
+	BaseDir string
+
+	// BaseURL is the URL prefix under which BaseDir is served, e.g. "http://localhost:8080/uploads".
+	BaseURL string
+}

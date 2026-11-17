@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// TestCloneHeaders checks cloneHeaders masks secrets and returns an independent copy.
 func TestCloneHeaders(t *testing.T) {
 	h := http.Header{}
 	h.Set("Authorization", "Bearer abcdefghijklmnopqrstuvwxyz")
@@ -37,6 +38,7 @@ func TestCloneHeaders(t *testing.T) {
 	}
 }
 
+// TestCloneHeaders_DoesNotAliasSliceBackingArrays checks value slices are copied.
 func TestCloneHeaders_DoesNotAliasSliceBackingArrays(t *testing.T) {
 	h := http.Header{"X-Multi": []string{"a", "b"}}
 	clone := cloneHeaders(h)
@@ -51,52 +53,31 @@ func TestCloneHeaders_DoesNotAliasSliceBackingArrays(t *testing.T) {
 	}
 }
 
-func TestMaskAuthorization(t *testing.T) {
+// TestMaskQuery_HidesSecretParams checks secret-named parameters are masked and others kept.
+func TestMaskQuery_HidesSecretParams(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
 		want string
 	}{
-		{name: "a Bearer token keeps only the scheme", in: "Bearer abcdefghijklmnopqrstuvwxyz", want: "Bearer ****"},
-		{name: "a short token is masked too", in: "Bearer short", want: "Bearer ****"},
-		{name: "other schemes are masked", in: "Basic dXNlcjpwYXNz", want: "Basic ****"},
-		{name: "a bare credential is fully masked", in: "raw-api-key", want: "****"},
-		{name: "empty string", in: "", want: ""},
+		{name: "empty", in: "", want: ""},
+		{name: "plain params unchanged", in: "page=2&sort=name", want: "page=2&sort=name"},
+		{name: "secret params masked in place", in: "q=go&access_token=abc&page=1", want: "q=go&access_token=****&page=1"},
+		{name: "encoded name is decoded before matching", in: "api%5Fkey=abc", want: "api%5Fkey=****"},
+		{name: "case-insensitive", in: "Password=hunter2", want: "Password=****"},
+		{name: "flag without value kept", in: "debug&token=x", want: "debug&token=****"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := maskAuthorization(tt.in); got != tt.want {
-				t.Fatalf("maskAuthorization(%q) = %q, want %q", tt.in, got, tt.want)
+			if got := maskQuery(tt.in); got != tt.want {
+				t.Fatalf("maskQuery(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestMaskCookie(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{name: "empty string", in: "", want: ""},
-		{name: "single cookie", in: "session=secretvalue", want: "session=****"},
-		{
-			name: "multiple cookies keep their names, values masked",
-			in:   "session=secretvalue; theme=dark",
-			want: "session=****; theme=****",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := maskCookie(tt.in); got != tt.want {
-				t.Fatalf("maskCookie(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
+// TestCloneHeaders_MasksSecretHeaders checks every value of every secret-named header is masked.
 func TestCloneHeaders_MasksSecretHeaders(t *testing.T) {
 	h := http.Header{}
 	h.Set("X-Api-Key", "k-123")

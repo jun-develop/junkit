@@ -4,23 +4,27 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/jun-develop/junkit/security"
 )
 
-// getHostname returns the current machine's hostname, or "unknown" if it can't be determined.
-func getHostname() string {
+// hostname is the machine's hostname, or "unknown", looked up once since it rarely changes.
+var hostname = sync.OnceValue(func() string {
 	h, err := os.Hostname()
 	if err != nil {
 		return "unknown"
 	}
 
 	return h
-}
+})
 
 // getServerIP returns the first non-loopback IPv4 address on this machine, or "unknown".
 func getServerIP() string {
@@ -62,11 +66,11 @@ func ServerInfo(r *http.Request) map[string]any {
 		"method":          r.Method,
 		"full_url":        rebuildFullURL(r),
 		"path":            r.URL.Path,
-		"query_string":    r.URL.RawQuery,
+		"query_string":    maskQuery(r.URL.RawQuery),
 		"protocol":        r.Proto,
 		"host":            host,
 		"host_port":       port,
-		"server_name":     getHostname(),
+		"server_name":     hostname(),
 		"server_ip":       getServerIP(),
 		"client_ip":       clientHost(r),
 		"client_port":     clientPort,
@@ -75,8 +79,8 @@ func ServerInfo(r *http.Request) map[string]any {
 		"user_agent":      r.UserAgent(),
 		"referer":         r.Referer(),
 		"content_type":    r.Header.Get("Content-Type"),
-		"authorization":   maskAuthorization(r.Header.Get("Authorization")),
-		"cookie":          maskCookie(r.Header.Get("Cookie")),
+		"authorization":   security.MaskHeader("Authorization", r.Header.Get("Authorization")),
+		"cookie":          security.MaskHeader("Cookie", r.Header.Get("Cookie")),
 		"headers":         cloneHeaders(r.Header),
 		"go_version":      runtime.Version(),
 		"pid":             os.Getpid(),
@@ -105,65 +109,43 @@ func clientHost(r *http.Request) string {
 	return host
 }
 
-// rebuildFullURL reconstructs r's absolute URL, honoring TLS/X-Forwarded-Proto for scheme.
+// rebuildFullURL reconstructs r's absolute URL, honoring TLS/X-Forwarded-Proto for scheme, with
+// secret query parameters masked.
 func rebuildFullURL(r *http.Request) string {
 	scheme := "http"
 	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
 		scheme = "https"
 	}
 
-	return scheme + "://" + r.Host + r.RequestURI
+	uri := r.RequestURI
+	if path, query, ok := strings.Cut(uri, "?"); ok {
+		uri = path + "?" + maskQuery(query)
+	}
+
+	return scheme + "://" + r.Host + uri
 }
 
-// maskAuthorization keeps only the auth scheme (e.g. "Bearer") and hides the credentials.
-func maskAuthorization(s string) string {
-	if s == "" {
-		return ""
-	}
+// maskQuery replaces the value of every secret-named parameter in the raw query with "****",
+// keeping parameter order and the encoding of the rest untouched.
+func maskQuery(raw string) string {
+	params := strings.Split(raw, "&")
+	for i, p := range params {
+		rawName, _, ok := strings.Cut(p, "=")
+		if !ok {
+			continue
+		}
 
-	if scheme, _, ok := strings.Cut(s, " "); ok {
-		return scheme + " ****"
-	}
+		name, err := url.QueryUnescape(rawName)
+		if err != nil {
+			name = rawName
+		}
 
-	return "****"
-}
-
-// maskCookie replaces every cookie value with "****", keeping the cookie names visible.
-func maskCookie(s string) string {
-	if s == "" {
-		return ""
-	}
-
-	parts := strings.Split(s, "; ")
-	for i, p := range parts {
-		if eq := strings.IndexByte(p, '='); eq > 0 {
-			parts[i] = p[:eq+1] + "****"
+		if security.IsSecretName(name) {
+			params[i] = rawName + "=****"
 		}
 	}
 
-	return strings.Join(parts, "; ")
-}
-
-// secretHeaderHints are substrings marking a header name as carrying a secret.
-var secretHeaderHints = []string{"token", "secret", "password", "api-key", "apikey", "signature", "session"}
-
-// MaskHeader returns value with any secret it carries, as judged by the header name, hidden.
-func MaskHeader(name, value string) string {
-	lower := strings.ToLower(name)
-	switch lower {
-	case "authorization", "proxy-authorization":
-		return maskAuthorization(value)
-	case "cookie", "set-cookie":
-		return maskCookie(value)
-	}
-
-	for _, hint := range secretHeaderHints {
-		if strings.Contains(lower, hint) {
-			return "****"
-		}
-	}
-
-	return value
+	return strings.Join(params, "&")
 }
 
 // cloneHeaders deep-copies h, masking every value of secret-bearing headers.
@@ -176,7 +158,7 @@ func cloneHeaders(h http.Header) http.Header {
 	for k, vv := range h {
 		masked := make([]string, len(vv))
 		for i, v := range vv {
-			masked[i] = MaskHeader(k, v)
+			masked[i] = security.MaskHeader(k, v)
 		}
 
 		clone[k] = masked

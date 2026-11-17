@@ -13,11 +13,11 @@ import (
 	"github.com/jun-develop/junkit/validation"
 )
 
+// TestBind covers BindJSON, BindQuery and ParseUUID through a real gin router.
 func TestBind(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	translator := i18n.NewTranslator()
-	responder := response.NewResponder(response.Options{Language: "en"}, translator)
-	v := validation.NewValidator(validation.Options{Language: "en"}, translator)
+	responder := response.NewResponder(i18n.NewTranslator())
+	v := newValidator(t, validation.Options{})
 
 	run := func(t *testing.T, path, target, body string, handle gin.HandlerFunc) *httptest.ResponseRecorder {
 		t.Helper()
@@ -42,6 +42,17 @@ func TestBind(t *testing.T) {
 		}
 	}
 
+	type query struct {
+		Page int `form:"page" binding:"required,min=1"`
+	}
+
+	bindQuery := func(c *gin.Context) {
+		var req query
+		if validation.BindQuery(c, responder, v, &req) {
+			c.Status(http.StatusNoContent)
+		}
+	}
+
 	parseUUID := func(c *gin.Context) {
 		if _, ok := validation.ParseUUID(c, responder, v); ok {
 			c.Status(http.StatusNoContent)
@@ -58,6 +69,10 @@ func TestBind(t *testing.T) {
 	}{
 		{"BindJSON valid", "/", "/", `{"name":"a"}`, bindJSON, http.StatusNoContent},
 		{"BindJSON invalid", "/", "/", `{}`, bindJSON, http.StatusUnprocessableEntity},
+		{"BindQuery valid", "/", "/?page=2", "", bindQuery, http.StatusNoContent},
+		{"BindQuery missing field", "/", "/", "", bindQuery, http.StatusUnprocessableEntity},
+		{"BindQuery below minimum", "/", "/?page=0", "", bindQuery, http.StatusUnprocessableEntity},
+		{"BindQuery not a number", "/", "/?page=abc", "", bindQuery, http.StatusUnprocessableEntity},
 		{"ParseUUID valid", "/:uuid", "/0b6c4a8e-5d3f-4c1e-9a2b-7f8e9d0c1b2a", "", parseUUID, http.StatusNoContent},
 		{"ParseUUID invalid", "/:uuid", "/not-a-uuid", "", parseUUID, http.StatusUnprocessableEntity},
 	}

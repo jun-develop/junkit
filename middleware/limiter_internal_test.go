@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,77 +9,74 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/jun-develop/junkit/notification"
 )
 
-func TestClientStore_GetLimiterIsStablePerIP(t *testing.T) {
+func TestClientStore_GetClientIsStablePerKey(t *testing.T) {
 	store := NewClientStore(LimiterOptions{RequestsPerSecond: 5, Burst: 5})
+	first := store.getClient("203.0.113.1")
 
-	first := store.getLimiter("203.0.113.1")
-	second := store.getLimiter("203.0.113.1")
-	if first != second {
-		t.Fatal("getLimiter returned a different *rate.Limiter for the same IP on a second call")
+	if store.getClient("203.0.113.1") != first {
+		t.Fatal("getClient returned a different entry for the same key on a second call")
 	}
 
-	other := store.getLimiter("203.0.113.2")
-	if other == first {
-		t.Fatal("getLimiter returned the same *rate.Limiter for two different IPs")
+	if store.getClient("203.0.113.2") == first {
+		t.Fatal("getClient returned the same entry for two different keys")
 	}
 }
 
-func TestClientStore_GetShardIsDeterministic(t *testing.T) {
-	store := NewClientStore(LimiterOptions{NumShards: 8})
-
-	first := store.getShard("203.0.113.1")
-	second := store.getShard("203.0.113.1")
-	if first != second {
-		t.Fatal("getShard returned a different shard for the same IP on a second call")
-	}
-}
-
-func TestNewClientStore_DefaultsNumShards(t *testing.T) {
+func TestNewClientStore_Defaults(t *testing.T) {
 	store := NewClientStore(LimiterOptions{})
-	if store.numShards != 64 {
-		t.Fatalf("numShards = %d, want the documented default of 64", store.numShards)
-	}
 
-	if len(store.shards) != 64 {
-		t.Fatalf("len(shards) = %d, want 64", len(store.shards))
+	if len(store.shards) != 64 || store.cleanupInterval != time.Minute || store.clientTTL != 10*time.Minute {
+		t.Fatalf("shards %d, cleanup %v, ttl %v, want 64, 1m, 10m", len(store.shards), store.cleanupInterval, store.clientTTL)
 	}
 }
 
-func TestClientStore_CleanupEvictsIdleEntries(t *testing.T) {
-	store := NewClientStore(LimiterOptions{RequestsPerSecond: 5, Burst: 5, ClientTTL: 10 * time.Millisecond})
+func TestClientStore_SweepEvictsIdleEntriesOnAccess(t *testing.T) {
+	store := NewClientStore(LimiterOptions{RequestsPerSecond: 5, Burst: 5, NumShards: 1})
+	old := store.getClient("203.0.113.1")
+	old.lastSeen.Store(time.Now().Add(-time.Hour).UnixNano())
+	store.shards[0].lastSweep.Store(time.Now().Add(-time.Hour).UnixNano())
 
-	store.getLimiter("203.0.113.1")
+	store.getClient("203.0.113.2")
 
-	sh := store.getShard("203.0.113.1")
-	sh.mu.RLock()
-	_, exists := sh.clients["203.0.113.1"]
-	sh.mu.RUnlock()
-	if !exists {
-		t.Fatal("test setup invariant broken: entry should exist right after getLimiter")
-	}
-
-	time.Sleep(20 * time.Millisecond) // let the entry age past ClientTTL
-
-	for i := 0; i < store.numShards; i++ {
-		store.cleanupShard(i)
-	}
-
-	sh.mu.RLock()
-	_, stillExists := sh.clients["203.0.113.1"]
-	sh.mu.RUnlock()
-	if stillExists {
-		t.Fatal("cleanupShard did not evict an entry idle past ClientTTL")
+	if _, exists := store.shards[0].clients["203.0.113.1"]; exists {
+		t.Fatal("an entry idle past ClientTTL survived the sweep its shard's next request ran")
 	}
 }
 
-func TestRateLimitAlertMessage_EscapesRequestValues(t *testing.T) {
+func TestClient_ShouldAlertThrottles(t *testing.T) {
+	var c client
+	now := time.Now()
+
+	if !c.shouldAlert(now, time.Minute) || c.shouldAlert(now.Add(time.Second), time.Minute) ||
+		!c.shouldAlert(now.Add(2*time.Minute), time.Minute) {
+		t.Fatal("shouldAlert want true, false within the TTL, true after it")
+	}
+}
+
+// recordingNotifier records Send messages.
+type recordingNotifier struct{ messages []string }
+
+// Send implements notification.Notifier.
+func (n *recordingNotifier) Send(_ context.Context, _ notification.Level, msg string) {
+	n.messages = append(n.messages, msg)
+}
+
+// ReportError implements notification.Notifier.
+func (n *recordingNotifier) ReportError(context.Context, *http.Request, notification.ErrorReport) {}
+
+func TestSendAlert_EscapesRequestValues(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodGet, "/%3Cb%3Ex&y", nil)
+	n := &recordingNotifier{}
 
-	msg := rateLimitAlertMessage(c, "1.2.3.4")
-	if strings.Contains(msg, "<b>x") || !strings.Contains(msg, "/&lt;b&gt;x&amp;y") {
-		t.Fatalf("path not HTML-escaped in alert:\n%s", msg)
+	sendAlert(c, n, "<b>Title</b>", "IP", "1.2.3.4")
+
+	if len(n.messages) != 1 || strings.Contains(n.messages[0], "<b>x") || !strings.Contains(n.messages[0], "/&lt;b&gt;x&amp;y") ||
+		!strings.Contains(n.messages[0], "<b>Title</b>") {
+		t.Fatalf("alert not built or path not HTML-escaped:\n%v", n.messages)
 	}
 }

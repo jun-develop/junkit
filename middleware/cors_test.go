@@ -67,20 +67,14 @@ func TestCORS_WildcardWithoutCredentials(t *testing.T) {
 	}
 }
 
-func TestCORS_WildcardWithCredentialsEchoesOrigin(t *testing.T) {
-	// Browsers reject "*" with credentials, so the request origin must be echoed.
-	opts := middleware.CORSOptions{AllowOrigins: []string{"*"}, AllowCredentials: true}
-	w, c := newCORSContext(http.MethodGet, "https://anywhere.example.com")
+func TestCORS_WildcardWithCredentialsPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("CORS did not panic for AllowOrigins \"*\" with AllowCredentials")
+		}
+	}()
 
-	middleware.CORS(opts)(c)
-
-	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "https://anywhere.example.com" {
-		t.Errorf("Access-Control-Allow-Origin = %q, want the echoed origin, not \"*\"", got)
-	}
-
-	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
-		t.Errorf("Access-Control-Allow-Credentials = %q, want %q", got, "true")
-	}
+	middleware.CORS(middleware.CORSOptions{AllowOrigins: []string{"*"}, AllowCredentials: true})
 }
 
 func TestCORS_NoOriginHeader(t *testing.T) {

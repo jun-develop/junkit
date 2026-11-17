@@ -17,14 +17,17 @@ func newCtx() (context.Context, *tracer.Debugger) {
 	return tracer.WithContext(context.Background(), d), d
 }
 
+// TestDebugger_NilReceiverIsSafe checks a nil Debugger ignores Append and returns no logs.
 func TestDebugger_NilReceiverIsSafe(t *testing.T) {
 	var d *tracer.Debugger
-	d.Append(tracer.LogEntry{Type: tracer.TypeComment}) // must not panic
+	// Must not panic.
+	d.Append(tracer.LogEntry{Type: tracer.TypeComment})
 	if logs := d.Logs(); logs != nil {
 		t.Fatalf("Logs() on nil Debugger = %v, want nil", logs)
 	}
 }
 
+// TestDebugger_AppendKeepsOrder checks entries are returned in append order.
 func TestDebugger_AppendKeepsOrder(t *testing.T) {
 	d := tracer.New()
 	d.Append(tracer.LogEntry{Type: tracer.TypeComment, Label: "first"})
@@ -36,6 +39,7 @@ func TestDebugger_AppendKeepsOrder(t *testing.T) {
 	}
 }
 
+// TestDebugger_LogsReturnsASnapshot checks Logs returns a copy unaffected by later appends.
 func TestDebugger_LogsReturnsASnapshot(t *testing.T) {
 	d := tracer.New()
 	d.Append(tracer.LogEntry{Type: tracer.TypeComment, Label: "original"})
@@ -48,6 +52,7 @@ func TestDebugger_LogsReturnsASnapshot(t *testing.T) {
 	}
 }
 
+// TestFromContext checks FromContext and Enabled with and without an attached Debugger.
 func TestFromContext(t *testing.T) {
 	if got := tracer.FromContext(context.Background()); got != nil {
 		t.Fatalf("FromContext() on a plain context = %v, want nil", got)
@@ -67,6 +72,7 @@ func TestFromContext(t *testing.T) {
 	}
 }
 
+// TestFromContext_GinContextUsesRequestContext checks gin.Context lookup.
 func TestFromContext_GinContextUsesRequestContext(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	d := tracer.New()
@@ -85,22 +91,24 @@ func TestFromContext_GinContextUsesRequestContext(t *testing.T) {
 	}
 }
 
+// TestLogHelpers_NoOpWithoutDebugger checks every log helper is a no-op without a Debugger.
 func TestLogHelpers_NoOpWithoutDebugger(t *testing.T) {
 	ctx := context.Background()
 	// None of these may panic or record anywhere.
-	tracer.C(ctx, "note")
-	tracer.V(ctx, "value", 1)
-	tracer.W(ctx, "warn", "boom")
-	tracer.E(ctx, "err", "boom")
+	tracer.Comment(ctx, "note")
+	tracer.Var(ctx, "value", 1)
+	tracer.Warn(ctx, "warn", "boom")
+	tracer.Error(ctx, "err", "boom")
 	tracer.Stop(ctx, "stop", 1)
 }
 
-func TestC_V(t *testing.T) {
+// TestComment_Var checks Comment records a note and Var one entry per value.
+func TestComment_Var(t *testing.T) {
 	ctx, d := newCtx()
 
-	tracer.C(ctx, "starting")
-	tracer.V(ctx, "pair", 1, "two")
-	tracer.V(ctx, "failure", errors.New("boom"))
+	tracer.Comment(ctx, "starting")
+	tracer.Var(ctx, "pair", 1, "two")
+	tracer.Var(ctx, "failure", errors.New("boom"))
 
 	logs := d.Logs()
 	if len(logs) != 4 {
@@ -112,19 +120,20 @@ func TestC_V(t *testing.T) {
 	}
 
 	if logs[1].Data != 1 || logs[2].Data != "two" {
-		t.Errorf("V recorded %v, %v, want one entry per value", logs[1].Data, logs[2].Data)
+		t.Errorf("Var recorded %v, %v, want one entry per value", logs[1].Data, logs[2].Data)
 	}
 
 	if logs[3].Data != "boom" {
-		t.Errorf("V(error) recorded %#v, want the error message", logs[3].Data)
+		t.Errorf("Var(error) recorded %#v, want the error message", logs[3].Data)
 	}
 }
 
-func TestW_E(t *testing.T) {
+// TestWarn_Error checks Warn and Error record issues, only Error with a stack.
+func TestWarn_Error(t *testing.T) {
 	ctx, d := newCtx()
 
-	tracer.W(ctx, "", "soft")
-	tracer.E(ctx, "db failed", errors.New("hard"))
+	tracer.Warn(ctx, "", "soft")
+	tracer.Error(ctx, "db failed", errors.New("hard"))
 
 	logs := d.Logs()
 	if len(logs) != 2 {
@@ -142,6 +151,7 @@ func TestW_E(t *testing.T) {
 	}
 }
 
+// TestStop_PanicsWithBreakpointAfterRecording checks record-then-panic.
 func TestStop_PanicsWithBreakpointAfterRecording(t *testing.T) {
 	ctx, d := newCtx()
 

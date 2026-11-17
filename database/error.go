@@ -3,10 +3,11 @@ package database
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
-// ErrorType categorizes a database failure into a class a repository can
-// branch on, independent of the underlying driver's error type.
+// ErrorType categorizes a database failure into a class a repository can branch on, independent
+// of the underlying driver's error type.
 type ErrorType string
 
 // Error classes recognized by Classify.
@@ -24,7 +25,7 @@ const (
 )
 
 // Classifier maps a driver error to an ErrorType and detail; ok is false when err is not one of
-// the driver's errors.
+// the driver's errors. detail may carry raw database messages (see Classify).
 type Classifier func(err error) (errType ErrorType, detail string, ok bool)
 
 // classifiers is written only from engine packages' init functions, so reads need no lock.
@@ -42,9 +43,14 @@ func RegisterClassifier(c Classifier) {
 // Classify maps err to an ErrorType and a human-readable detail message, trying every registered
 // engine Classifier in order.
 //
+// detail is for internal logs only, never for clients: it can contain raw database messages
+// (constraint names, SQLSTATE text, RAISE EXCEPTION messages, err.Error()) that leak schema and
+// data. Map the ErrorType to a client-facing error instead.
+//
 // Usage:
 //
 //	if errType, detail := database.Classify(err); errType == database.ErrorUniqueViolation {
+//	    log.Warn("duplicate user", zap.String("detail", detail))
 //	    return response.New(response.Conflict, "email_already_exists")
 //	}
 func Classify(err error) (ErrorType, string) {
@@ -123,4 +129,21 @@ func Match(err error, mapping map[ErrorType]error) error {
 //	return nil, database.MatchNotFound(err, domain.ErrUserNotFound)
 func MatchNotFound(err, notFound error) error {
 	return Match(err, map[ErrorType]error{ErrorNotFound: notFound})
+}
+
+// Wrapper returns a func that prefixes err with "<prefix>: <op>: " and keeps it unwrappable;
+// nil stays nil.
+//
+// Usage:
+//
+//	var wrap = database.Wrapper("user repository")
+//	return nil, wrap("get user", database.MatchNotFound(err, domain.ErrUserNotFound))
+func Wrapper(prefix string) func(op string, err error) error {
+	return func(op string, err error) error {
+		if err == nil {
+			return nil
+		}
+
+		return fmt.Errorf("%s: %s: %w", prefix, op, err)
+	}
 }

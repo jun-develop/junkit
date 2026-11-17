@@ -2,20 +2,29 @@ package slicex_test
 
 import (
 	"encoding/json"
-	"slices"
 	"strconv"
 	"testing"
 
 	"github.com/jun-develop/junkit/slicex"
 )
 
-func TestMap(t *testing.T) {
-	if got := slicex.Map([]int{1, 2, 3}, strconv.Itoa); !slices.Equal(got, []string{"1", "2", "3"}) {
-		t.Errorf("Map = %v, want [1 2 3]", got)
+func TestMap_Results(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []int
+		want string
+	}{
+		{"maps each element in order", []int{1, 2, 3}, `["1","2","3"]`},
+		{"nil input marshals as an empty list", nil, `[]`},
+		{"empty input marshals as an empty list", []int{}, `[]`},
 	}
 
-	var none []int
-	if b, _ := json.Marshal(slicex.Map(none, strconv.Itoa)); string(b) != "[]" {
-		t.Errorf("Map(nil) marshals to %s, want []", b)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := json.Marshal(slicex.Map(tt.in, strconv.Itoa))
+			if err != nil || string(b) != tt.want {
+				t.Fatalf("Map(%v) marshals to %s (err %v), want %s", tt.in, b, err, tt.want)
+			}
+		})
 	}
 }

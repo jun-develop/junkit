@@ -2,6 +2,9 @@ package validation
 
 import (
 	"bufio"
+	"context"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,13 +15,13 @@ import (
 	"time"
 
 	"github.com/go-playground/validator/v10"
-
-	"github.com/jun-develop/junkit/console"
 )
 
-// DefaultBlocklistPath is the file path for loading disposable email domains. Set it before
-// NewValidator when the working directory is read-only (e.g. under the app's storage dir).
-var DefaultBlocklistPath = "storage/bootstrap/email_blocklist.conf"
+// mxCacheTTL is how long a definitive mail-host lookup result is reused.
+const mxCacheTTL = 10 * time.Minute
+
+// mxCacheMax caps the lookup cache, whose keys come from user input.
+const mxCacheMax = 10_000
 
 // emailRegex and the patterns below back the custom validation rules.
 var (
@@ -33,93 +36,151 @@ var (
 	phoneRegex        = regexp.MustCompile(`^(\+)?([0-9]){7,15}$`)
 )
 
-// dynamicDisposableDomains is the disposable email blocklist, guarded by dynamicDomainsMux.
-var (
-	dynamicDisposableDomains = make(map[string]bool)
-	dynamicDomainsMux        sync.RWMutex
-)
+// resolver is the part of *net.Resolver the email_advanced rule uses; tests swap in a fake.
+type resolver interface {
+	LookupMX(ctx context.Context, name string) ([]*net.MX, error)
+	LookupHost(ctx context.Context, host string) ([]string, error)
+}
 
-// LoadDisposableEmailsFromFile replaces the disposable email blocklist with the
-// newline-delimited domains in path.
-//
-// Usage:
-//
-//	err := validation.LoadDisposableEmailsFromFile("blocklist.conf")
-func LoadDisposableEmailsFromFile(path string) error {
+// mxResult is a cached mail-host lookup result.
+type mxResult struct {
+	ok      bool
+	expires time.Time
+}
+
+// emailChecker backs the email_advanced rule: syntax, disposable domain and mail host.
+type emailChecker struct {
+	blocklist map[string]bool
+	resolver  resolver
+	timeout   time.Duration
+
+	mu    sync.Mutex
+	cache map[string]mxResult
+}
+
+// newEmailChecker builds an emailChecker from opts, reading opts.BlocklistPath when set.
+func newEmailChecker(opts Options) (*emailChecker, error) {
+	blocklist, err := loadBlocklist(opts.BlocklistPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return &emailChecker{
+		blocklist: blocklist,
+		resolver:  net.DefaultResolver,
+		timeout:   opts.MXTimeout,
+		cache:     make(map[string]mxResult),
+	}, nil
+}
+
+// valid reports whether email has valid syntax, a non-disposable domain and a mail host.
+func (c *emailChecker) valid(email string) bool {
+	if !emailRegex.MatchString(email) {
+		return false
+	}
+
+	// emailRegex allows exactly one "@".
+	domain := strings.ToLower(email[strings.IndexByte(email, '@')+1:])
+
+	// A dotless name or an IP literal would resolve via /etc/hosts or without DNS at all.
+	if !strings.Contains(domain, ".") || net.ParseIP(domain) != nil || c.blocklist[domain] {
+		return false
+	}
+
+	return c.hasMailHost(domain)
+}
+
+// hasMailHost reports whether domain can receive mail. A failed lookup (timeout, SERVFAIL) says
+// nothing about the domain, so it accepts the address and is not cached.
+func (c *emailChecker) hasMailHost(domain string) bool {
+	now := time.Now()
+
+	c.mu.Lock()
+	cached, hit := c.cache[domain]
+	c.mu.Unlock()
+
+	if hit && now.Before(cached.expires) {
+		return cached.ok
+	}
+
+	ok, definitive := c.lookup(domain)
+	if !definitive {
+		return true
+	}
+
+	c.mu.Lock()
+	// shortcut: a full cache is dropped wholesale; switch to an LRU if lookups show up in latency.
+	if len(c.cache) >= mxCacheMax {
+		clear(c.cache)
+	}
+
+	c.cache[domain] = mxResult{ok: ok, expires: now.Add(mxCacheTTL)}
+	c.mu.Unlock()
+
+	return ok
+}
+
+// lookup checks domain for MX records, then for A/AAAA records (RFC 5321 implicit MX).
+// definitive is false when DNS itself failed rather than answering "no such host / no records".
+func (c *emailChecker) lookup(domain string) (ok, definitive bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	mxs, err := c.resolver.LookupMX(ctx, domain)
+	if err == nil && len(mxs) > 0 {
+		return true, true
+	}
+
+	if err != nil && !isNotFound(err) {
+		return false, false
+	}
+
+	hosts, err := c.resolver.LookupHost(ctx, domain)
+	if err != nil {
+		return false, isNotFound(err)
+	}
+
+	return len(hosts) > 0, true
+}
+
+// isNotFound reports whether err is a definitive DNS "no such host / no records" answer.
+func isNotFound(err error) bool {
+	var dnsErr *net.DNSError
+
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
+}
+
+// loadBlocklist reads the newline-delimited disposable domains in path, or returns the seed
+// list when path is empty.
+func loadBlocklist(path string) (map[string]bool, error) {
+	domains := make(map[string]bool)
+	if path == "" {
+		for _, domain := range seedDisposableDomains {
+			domains[domain] = true
+		}
+
+		return domains, nil
+	}
+
 	file, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("validation: open blocklist: %w", err)
 	}
 
 	defer file.Close()
 
-	newDomains := make(map[string]bool)
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		domain := strings.TrimSpace(scanner.Text())
-		if domain != "" {
-			newDomains[strings.ToLower(domain)] = true
+		if domain := strings.TrimSpace(scanner.Text()); domain != "" {
+			domains[strings.ToLower(domain)] = true
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return err
+		return nil, fmt.Errorf("validation: read blocklist: %w", err)
 	}
 
-	dynamicDomainsMux.Lock()
-	dynamicDisposableDomains = newDomains
-	dynamicDomainsMux.Unlock()
-
-	return nil
-}
-
-// IsDisposableEmail reports whether domain is in the disposable email blocklist (case-insensitive).
-func IsDisposableEmail(domain string) bool {
-	normalized := strings.ToLower(domain)
-
-	dynamicDomainsMux.RLock()
-	defer dynamicDomainsMux.RUnlock()
-
-	return dynamicDisposableDomains[normalized]
-}
-
-// CheckMXRecord reports whether domain has at least one DNS MX record.
-func CheckMXRecord(domain string) bool {
-	mxs, err := net.LookupMX(domain)
-	if err != nil {
-		console.Warnf("validation: mx lookup for domain %s: %v", domain, err)
-		return false
-	}
-
-	if len(mxs) == 0 {
-		console.Warnf("validation: no mx records found for domain %s", domain)
-		return false
-	}
-
-	return true
-}
-
-// ValidateEmail reports whether email has valid syntax, a non-disposable domain, and live MX
-// records. The MX check does a DNS lookup.
-func ValidateEmail(email string) bool {
-	if !emailRegex.MatchString(email) {
-		console.Warnf("validation: invalid email format")
-		return false
-	}
-
-	parts := strings.Split(email, "@")
-	if len(parts) != 2 {
-		console.Warnf("validation: invalid email parts: %d", len(parts))
-		return false
-	}
-
-	domain := strings.ToLower(parts[1])
-	if IsDisposableEmail(domain) {
-		console.Warnf("validation: disposable email domain detected: %s", domain)
-		return false
-	}
-
-	return CheckMXRecord(domain)
+	return domains, nil
 }
 
 // customRule pairs a validator tag with its validation function.
@@ -128,18 +189,17 @@ type customRule struct {
 	fn  validator.Func
 }
 
-// RegisterCustomValidation registers the custom rules on v and loads the default blocklist,
-// creating it from the seed list if missing.
+// RegisterCustomValidation registers the custom rules (email_advanced, password_strong, slug,
+// search, min_int, max_int, file_ext, alphanum_dash, date, date_past, phone_advanced) on engine.
+// NewValidator already registers them on gin's binding engine; call this for another engine.
 //
 // Usage:
 //
-//	validation.RegisterCustomValidation(v)
-func RegisterCustomValidation(v *validator.Validate) {
-	loadDefaultBlocklist()
-
+//	err := v.RegisterCustomValidation(validator.New())
+func (v *Validator) RegisterCustomValidation(engine *validator.Validate) error {
 	rules := []customRule{
 		{"email_advanced", func(fl validator.FieldLevel) bool {
-			return ValidateEmail(fl.Field().String())
+			return v.email.valid(fl.Field().String())
 		}},
 		{"password_strong", validatePasswordStrong},
 		{"slug", func(fl validator.FieldLevel) bool {
@@ -165,13 +225,15 @@ func RegisterCustomValidation(v *validator.Validate) {
 	}
 
 	for _, rule := range rules {
-		if err := v.RegisterValidation(rule.tag, rule.fn); err != nil {
-			console.Warnf("validation: register %s rule: %v", rule.tag, err)
+		if err := engine.RegisterValidation(rule.tag, rule.fn); err != nil {
+			return fmt.Errorf("validation: register %s rule: %w", rule.tag, err)
 		}
 	}
+
+	return nil
 }
 
-// seedDisposableDomains is written to DefaultBlocklistPath when that file does not exist.
+// seedDisposableDomains is the blocklist used when Options.BlocklistPath is empty.
 var seedDisposableDomains = []string{
 	"10minutemail.co.za", "10minutemail.com", "10minutemail.net", "20minutemail.com",
 	"anonaddy.com", "burnermail.io", "burnthespam.info", "cool.fr.nf", "deadaddress.com", "despam.it",
@@ -193,35 +255,6 @@ var seedDisposableDomains = []string{
 	"shieldedmail.com", "shortmail.net", "skeefmail.com", "smellfear.com", "snakemail.com",
 	"sneakemail.com", "sofort-mail.de", "spam.la", "spam4.me", "spamavert.com",
 	"spamcannon.com", "spamcero.com", "spamcon.org", "spamcowboy.com", "spamday.com",
-}
-
-// loadDefaultBlocklist loads DefaultBlocklistPath, creating it with seed domains if missing.
-func loadDefaultBlocklist() {
-	if _, err := os.Stat(DefaultBlocklistPath); err != nil {
-		if err := createSeedBlocklist(DefaultBlocklistPath); err != nil {
-			console.Warnf("validation: create disposable email blocklist at %s: %v",
-				DefaultBlocklistPath, err)
-			return
-		}
-
-		console.Infof("validation: created disposable email blocklist at %s", DefaultBlocklistPath)
-	}
-
-	if err := LoadDisposableEmailsFromFile(DefaultBlocklistPath); err != nil {
-		console.Warnf("validation: load disposable email blocklist: %v", err)
-		return
-	}
-
-	console.Infof("validation: loaded disposable email blocklist from %s", DefaultBlocklistPath)
-}
-
-// createSeedBlocklist writes seedDisposableDomains to path, creating parent directories.
-func createSeedBlocklist(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-
-	return os.WriteFile(path, []byte(strings.Join(seedDisposableDomains, "\n")+"\n"), 0o644)
 }
 
 // validatePasswordStrong requires >= 8 characters with lower, upper, digit, and special chars.

@@ -18,14 +18,14 @@ import (
 )
 
 func newResponder() response.Responder {
-	return response.NewResponder(response.Options{Language: "en"}, i18n.NewTranslator())
+	return response.NewResponder(i18n.NewTranslator())
 }
 
 // newRecoverRouter sets up a Gin router with Recover middleware for testing.
 func newRecoverRouter(notifier notification.Notifier, opts middleware.RecoverOptions, handler gin.HandlerFunc) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	router.Use(middleware.Recover(zap.NewNop(), notifier, newResponder(), opts))
+	router.Use(middleware.Recover(opts, zap.NewNop(), notifier, newResponder()))
 	router.GET("/", handler)
 
 	return router
@@ -58,17 +58,17 @@ func TestRecover_PanicIsCaughtAndReported(t *testing.T) {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
 	}
 
-	notifications := notifier.errorNotifications()
+	notifications := notifier.errorReports()
 	if len(notifications) != 1 {
 		t.Fatalf("got %d error notifications, want 1", len(notifications))
 	}
 
-	if notifications[0].statusCode != http.StatusInternalServerError {
-		t.Fatalf("notified statusCode = %d, want %d", notifications[0].statusCode, http.StatusInternalServerError)
+	if notifications[0].StatusCode != http.StatusInternalServerError {
+		t.Fatalf("notified StatusCode = %d, want %d", notifications[0].StatusCode, http.StatusInternalServerError)
 	}
 
-	if notifications[0].data["error"] != "something broke" {
-		t.Fatalf(`notified error = %v, want "something broke"`, notifications[0].data["error"])
+	if notifications[0].Error != "something broke" {
+		t.Fatalf(`notified Error = %v, want "something broke"`, notifications[0].Error)
 	}
 }
 
@@ -97,7 +97,7 @@ func TestRecover_BreakpointSignalIsRePanicked(t *testing.T) {
 			t.Fatalf("recover() = %v (%T), want it to re-panic a tracer.BreakpointSignal untouched", r, r)
 		}
 
-		if len(notifier.errorNotifications()) != 0 {
+		if len(notifier.errorReports()) != 0 {
 			t.Error("a BreakpointSignal is not a real error and should not trigger a notification")
 		}
 	}()
@@ -115,12 +115,12 @@ func TestRecover_DebugBypassRoutesThroughTracer(t *testing.T) {
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, newDebugRequest("/?t_debug=1234"))
 
-	// Debug mode delegates to tracer.E without writing a response.
+	// Debug mode delegates to tracer.Error without writing a response.
 	if w.Code != http.StatusOK && w.Code != 0 {
 		t.Fatalf("status = %d, want no response written on the debug bypass path", w.Code)
 	}
 
-	if len(notifier.errorNotifications()) != 0 {
+	if len(notifier.errorReports()) != 0 {
 		t.Error("the debug bypass path should not send an error notification")
 	}
 }
@@ -140,8 +140,8 @@ func TestRecover_DebugWithoutSecretNeverBypasses(t *testing.T) {
 			w.Code, http.StatusInternalServerError)
 	}
 
-	if len(notifier.errorNotifications()) != 1 {
-		t.Fatalf("got %d error notifications, want 1 (the normal path should still notify)", len(notifier.errorNotifications()))
+	if len(notifier.errorReports()) != 1 {
+		t.Fatalf("got %d error notifications, want 1 (the normal path should still notify)", len(notifier.errorReports()))
 	}
 }
 
@@ -155,8 +155,8 @@ func TestRecover_ReportsThePanicSite(t *testing.T) {
 
 	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 
-	data := notifier.errorNotifications()[0].data
-	if loc, _ := data["location"].(string); !strings.HasSuffix(loc, "recover_test.go") || data["line"] != panicLine+1 {
-		t.Fatalf("location = %v:%v, want recover_test.go:%d (the panic site, not Recover's handler)", data["location"], data["line"], panicLine+1)
+	report := notifier.errorReports()[0]
+	if !strings.HasSuffix(report.Location, "recover_test.go") || report.Line != panicLine+1 {
+		t.Fatalf("location = %v:%v, want recover_test.go:%d (the panic site, not Recover's handler)", report.Location, report.Line, panicLine+1)
 	}
 }

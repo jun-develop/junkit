@@ -3,26 +3,12 @@ package security
 import (
 	"context"
 	"fmt"
-
-	"github.com/gin-gonic/gin"
 )
 
 // identityKey is the private context key for the authenticated identity.
 type identityKey struct{}
 
-// SetIdentity stores identity in the gin.Context and its request context.
-//
-// Usage:
-//
-//	security.SetIdentity(c, identity)
-func SetIdentity[T any](c *gin.Context, identity T) {
-	c.Set(identityKey{}, identity)
-	if c.Request != nil {
-		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), identityKey{}, identity))
-	}
-}
-
-// WithIdentity returns a copy of ctx carrying identity (for tests and background work).
+// WithIdentity returns a copy of ctx carrying identity; middleware.SetIdentity uses it for a request.
 //
 // Usage:
 //
@@ -31,24 +17,14 @@ func WithIdentity[T any](ctx context.Context, identity T) context.Context {
 	return context.WithValue(ctx, identityKey{}, identity)
 }
 
-// GetIdentity returns the identity of type T from a *gin.Context or context.Context.
+// GetIdentity returns the identity of type T from ctx. A *gin.Context only finds it when the engine
+// sets ContextWithFallback, since the identity lives in the request context; otherwise pass
+// c.Request.Context().
 //
 // Usage:
 //
 //	identity, ok := security.GetIdentity[*domain.Identity](ctx)
 func GetIdentity[T any](ctx context.Context) (T, bool) {
-	if gc, ok := ctx.(*gin.Context); ok {
-		if val, exists := gc.Get(identityKey{}); exists {
-			if identity, ok := val.(T); ok {
-				return identity, true
-			}
-		}
-
-		if gc.Request != nil {
-			ctx = gc.Request.Context()
-		}
-	}
-
 	identity, ok := ctx.Value(identityKey{}).(T)
 
 	return identity, ok
@@ -58,7 +34,7 @@ func GetIdentity[T any](ctx context.Context) (T, bool) {
 //
 // Usage:
 //
-//	identity := security.MustGetIdentity[*domain.Identity](c)
+//	identity := security.MustGetIdentity[*domain.Identity](c.Request.Context())
 func MustGetIdentity[T any](ctx context.Context) T {
 	identity, ok := GetIdentity[T](ctx)
 	if !ok {

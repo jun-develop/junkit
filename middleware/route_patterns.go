@@ -11,7 +11,8 @@ import (
 	"github.com/jun-develop/junkit/response"
 )
 
-var slugPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+// slugPattern is the validation package's slug rule, so a route accepts the slugs it stores.
+var slugPattern = regexp.MustCompile(`^[a-z0-9]+(?:[-.][a-z0-9]+)*$`)
 
 // RoutePatterns rejects a request with 404 when a path parameter named in patterns does not match
 // its rule, like Laravel's Route::pattern. Parameters without a rule are not checked.
@@ -50,7 +51,7 @@ func IsID(v string) bool {
 	return err == nil && n > 0
 }
 
-// IsSlug reports whether v is lowercase letters and digits joined by single hyphens.
+// IsSlug reports whether v is lowercase letters and digits joined by single hyphens or dots.
 func IsSlug(v string) bool {
 	return slugPattern.MatchString(v)
 }

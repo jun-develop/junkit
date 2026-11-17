@@ -3,13 +3,15 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"runtime"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-// RedisOptions configures a RedisCache's connection pool and timeouts.
+// RedisOptions configures the shared Redis client's connection pool and timeouts.
 type RedisOptions struct {
 	// Addr is the Redis server address, e.g. "localhost:6379".
 	Addr string
@@ -34,9 +36,47 @@ type RedisOptions struct {
 
 	// WriteTimeout bounds a single write. Defaults to 3s.
 	WriteTimeout time.Duration
+}
 
-	// Logger receives non-fatal errors (marshal/connection failures). Optional.
-	Logger Logger
+// withDefaults returns o with zero or negative pool sizes and timeouts set to their defaults.
+func (o RedisOptions) withDefaults() RedisOptions {
+	if o.PoolSize <= 0 {
+		o.PoolSize = 10 * runtime.GOMAXPROCS(0)
+	}
+
+	if o.MinIdleConns <= 0 {
+		o.MinIdleConns = 5
+	}
+
+	if o.DialTimeout <= 0 {
+		o.DialTimeout = 5 * time.Second
+	}
+
+	if o.ReadTimeout <= 0 {
+		o.ReadTimeout = 3 * time.Second
+	}
+
+	if o.WriteTimeout <= 0 {
+		o.WriteTimeout = 3 * time.Second
+	}
+
+	return o
+}
+
+// newRedisClient opens a lazily connecting client configured by opts.
+func newRedisClient(opts RedisOptions) *redis.Client {
+	opts = opts.withDefaults()
+
+	return redis.NewClient(&redis.Options{
+		Addr:         opts.Addr,
+		Password:     opts.Password,
+		DB:           opts.DB,
+		PoolSize:     opts.PoolSize,
+		MinIdleConns: opts.MinIdleConns,
+		DialTimeout:  opts.DialTimeout,
+		ReadTimeout:  opts.ReadTimeout,
+		WriteTimeout: opts.WriteTimeout,
+	})
 }
 
 // incrScript increments KEYS[1] and sets its expiry (ARGV[1] ms) if it has none, atomically.
@@ -48,134 +88,98 @@ end
 return n
 `)
 
-// RedisCache is a generic Cache backed by Redis; values are JSON-encoded.
-type RedisCache[T any] struct {
+// Redis is a generic Cache backed by Redis; values are JSON-encoded. It does not own its client.
+type Redis[T any] struct {
 	client *redis.Client
-	logger Logger
 }
 
-// NewRedisCache creates a RedisCache with opts.
-//
-// Usage:
-//
-//	c := cache.NewRedisCache[*User](cache.RedisOptions{Addr: "localhost:6379"})
-//	defer c.Close()
-func NewRedisCache[T any](opts RedisOptions) *RedisCache[T] {
-	poolSize := opts.PoolSize
-	if poolSize <= 0 {
-		poolSize = 10 * runtime.GOMAXPROCS(0)
-	}
-
-	minIdleConns := opts.MinIdleConns
-	if minIdleConns <= 0 {
-		minIdleConns = 5
-	}
-
-	dialTimeout := opts.DialTimeout
-	if dialTimeout <= 0 {
-		dialTimeout = 5 * time.Second
-	}
-
-	readTimeout := opts.ReadTimeout
-	if readTimeout <= 0 {
-		readTimeout = 3 * time.Second
-	}
-
-	writeTimeout := opts.WriteTimeout
-	if writeTimeout <= 0 {
-		writeTimeout = 3 * time.Second
-	}
-
-	rdb := redis.NewClient(&redis.Options{
-		Addr:         opts.Addr,
-		Password:     opts.Password,
-		DB:           opts.DB,
-		PoolSize:     poolSize,
-		MinIdleConns: minIdleConns,
-		DialTimeout:  dialTimeout,
-		ReadTimeout:  readTimeout,
-		WriteTimeout: writeTimeout,
-	})
-
-	return &RedisCache[T]{client: rdb, logger: opts.Logger}
-}
-
-// logError logs msg via the configured Logger, if any.
-func (c *RedisCache[T]) logError(msg string, keysAndValues ...any) {
-	if c.logger != nil {
-		c.logger.Error(msg, keysAndValues...)
-	}
+// NewRedis creates a Redis cache on client; the caller keeps ownership of client and closes it.
+func NewRedis[T any](client *redis.Client) *Redis[T] {
+	return &Redis[T]{client: client}
 }
 
 // Ping checks whether the Redis server is reachable.
-func (c *RedisCache[T]) Ping(ctx context.Context) error {
-	return c.client.Ping(ctx).Err()
+func (c *Redis[T]) Ping(ctx context.Context) error {
+	if err := c.client.Ping(ctx).Err(); err != nil {
+		return fmt.Errorf("cache: ping: %w", err)
+	}
+
+	return nil
 }
 
-// Get implements Cache.
-func (c *RedisCache[T]) Get(ctx context.Context, key string) (T, bool) {
-	var empty T
-
-	val, err := c.client.Get(ctx, key).Result()
-	if err == redis.Nil {
-		return empty, false
-	} else if err != nil {
-		c.logError("cache: redis get failed", "key", key, "error", err)
-		return empty, false
-	}
-
+// Lookup implements Cache; a missing key is a miss, a failed read or decode is an error.
+func (c *Redis[T]) Lookup(ctx context.Context, key string) (T, bool, error) {
 	var result T
-	if err := json.Unmarshal([]byte(val), &result); err != nil {
-		c.logError("cache: redis unmarshal failed", "key", key, "error", err)
-		return empty, false
+
+	val, err := c.client.Get(ctx, key).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return result, false, nil
 	}
 
-	return result, true
+	if err != nil {
+		return result, false, fmt.Errorf("cache: get: %w", err)
+	}
+
+	if err := json.Unmarshal(val, &result); err != nil {
+		return result, false, fmt.Errorf("cache: decode: %w", err)
+	}
+
+	return result, true, nil
+}
+
+// Get implements Cache; use Lookup to tell a failed read from a miss.
+func (c *Redis[T]) Get(ctx context.Context, key string) (T, bool) {
+	val, ok, _ := c.Lookup(ctx, key)
+
+	return val, ok
 }
 
 // Set implements Cache.
-func (c *RedisCache[T]) Set(ctx context.Context, key string, value T, ttl time.Duration) error {
+func (c *Redis[T]) Set(ctx context.Context, key string, value T, ttl time.Duration) error {
 	bytes, err := json.Marshal(value)
 	if err != nil {
-		c.logError("cache: redis marshal failed", "key", key, "error", err)
-		return err
+		return fmt.Errorf("cache: encode: %w", err)
 	}
 
 	if err := c.client.Set(ctx, key, bytes, ttl).Err(); err != nil {
-		c.logError("cache: redis set failed", "key", key, "error", err)
-		return err
+		return fmt.Errorf("cache: set: %w", err)
 	}
 
 	return nil
 }
 
 // Incr implements Cache.
-func (c *RedisCache[T]) Incr(ctx context.Context, key string, ttl time.Duration) (int64, error) {
-	return incrScript.Run(ctx, c.client, []string{key}, ttl.Milliseconds()).Int64()
+func (c *Redis[T]) Incr(ctx context.Context, key string, ttl time.Duration) (int64, error) {
+	n, err := incrScript.Run(ctx, c.client, []string{key}, ttl.Milliseconds()).Int64()
+	if err != nil {
+		return 0, fmt.Errorf("cache: incr: %w", err)
+	}
+
+	return n, nil
 }
 
 // Delete implements Cache.
-func (c *RedisCache[T]) Delete(ctx context.Context, key string) error {
+func (c *Redis[T]) Delete(ctx context.Context, key string) error {
 	if err := c.client.Del(ctx, key).Err(); err != nil {
-		c.logError("cache: redis delete failed", "key", key, "error", err)
-		return err
+		return fmt.Errorf("cache: delete: %w", err)
 	}
 
 	return nil
 }
 
 // Exists implements Cache.
-func (c *RedisCache[T]) Exists(ctx context.Context, key string) (bool, error) {
+func (c *Redis[T]) Exists(ctx context.Context, key string) (bool, error) {
 	val, err := c.client.Exists(ctx, key).Result()
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("cache: exists: %w", err)
 	}
 
 	return val > 0, nil
 }
 
-// GetOrSet implements Cache.
-func (c *RedisCache[T]) GetOrSet(ctx context.Context, key string, ttl time.Duration, fetchFn func() (T, error)) (T, error) {
+// GetOrSet implements Cache; a failed read counts as a miss and a failed store is ignored,
+// because fetchFn's value is still correct.
+func (c *Redis[T]) GetOrSet(ctx context.Context, key string, ttl time.Duration, fetchFn func() (T, error)) (T, error) {
 	if val, found := c.Get(ctx, key); found {
 		return val, nil
 	}
@@ -183,140 +187,12 @@ func (c *RedisCache[T]) GetOrSet(ctx context.Context, key string, ttl time.Durat
 	val, err := fetchFn()
 	if err != nil {
 		var empty T
+
 		return empty, err
 	}
 
-	if setErr := c.Set(ctx, key, val, ttl); setErr != nil {
-		c.logError("cache: redis set in GetOrSet failed", "key", key, "error", setErr)
-	}
+	// Best-effort: the caller has its value; the next call simply fetches again.
+	_ = c.Set(ctx, key, val, ttl)
 
 	return val, nil
-}
-
-// Close implements Cache; it closes the underlying connection pool.
-func (c *RedisCache[T]) Close() error {
-	return c.client.Close()
-}
-
-// IncrBy atomically increments the integer stored at key by value. The
-// stored value must be an integer's string representation.
-func (c *RedisCache[T]) IncrBy(ctx context.Context, key string, value int64) (int64, error) {
-	return c.client.IncrBy(ctx, key, value).Result()
-}
-
-// Expire sets a TTL on an existing key.
-func (c *RedisCache[T]) Expire(ctx context.Context, key string, ttl time.Duration) error {
-	return c.client.Expire(ctx, key, ttl).Err()
-}
-
-// SetNX atomically sets value at key only if the key does not already exist.
-//
-// Usage:
-//
-//	locked, _ := c.SetNX(ctx, "lock:order:456", true, 30*time.Second)
-//	if locked {
-//	    defer c.Delete(ctx, "lock:order:456")
-//	}
-func (c *RedisCache[T]) SetNX(ctx context.Context, key string, value T, ttl time.Duration) (bool, error) {
-	bytes, err := json.Marshal(value)
-	if err != nil {
-		return false, err
-	}
-
-	return c.client.SetNX(ctx, key, bytes, ttl).Result()
-}
-
-// MGet retrieves multiple keys in a single round-trip.
-func (c *RedisCache[T]) MGet(ctx context.Context, keys ...string) ([]T, []bool) {
-	if len(keys) == 0 {
-		return nil, nil
-	}
-
-	results := make([]T, len(keys))
-	found := make([]bool, len(keys))
-
-	vals, err := c.client.MGet(ctx, keys...).Result()
-	if err != nil {
-		c.logError("cache: redis mget failed", "keys", keys, "error", err)
-		return results, found
-	}
-
-	for i, val := range vals {
-		str, ok := val.(string)
-		if !ok {
-			continue
-		}
-
-		var result T
-		if err := json.Unmarshal([]byte(str), &result); err != nil {
-			c.logError("cache: redis mget unmarshal failed", "key", keys[i], "error", err)
-			continue
-		}
-
-		results[i] = result
-		found[i] = true
-	}
-
-	return results, found
-}
-
-// MSet stores multiple key-value pairs in a single round-trip, all with the same ttl.
-func (c *RedisCache[T]) MSet(ctx context.Context, items map[string]T, ttl time.Duration) error {
-	if len(items) == 0 {
-		return nil
-	}
-
-	pipe := c.client.Pipeline()
-	for key, value := range items {
-		bytes, err := json.Marshal(value)
-		if err != nil {
-			return err
-		}
-
-		pipe.Set(ctx, key, bytes, ttl)
-	}
-
-	_, err := pipe.Exec(ctx)
-
-	return err
-}
-
-// DeleteByPattern scans and deletes all keys matching the glob pattern in batches.
-func (c *RedisCache[T]) DeleteByPattern(ctx context.Context, pattern string) error {
-	var cursor uint64
-
-	for {
-		keys, nextCursor, err := c.client.Scan(ctx, cursor, pattern, 100).Result()
-		if err != nil {
-			return err
-		}
-
-		if len(keys) > 0 {
-			pipe := c.client.Pipeline()
-			for _, key := range keys {
-				pipe.Del(ctx, key)
-			}
-
-			if _, err := pipe.Exec(ctx); err != nil {
-				return err
-			}
-		}
-
-		cursor = nextCursor
-		if cursor == 0 {
-			break
-		}
-	}
-
-	return nil
-}
-
-// Clear removes all keys from the current Redis logical database.
-func (c *RedisCache[T]) Clear(ctx context.Context) error {
-	return c.client.FlushDB(ctx).Err()
-}
-
-// GetClient returns the underlying *redis.Client.
-func (c *RedisCache[T]) GetClient() *redis.Client {
-	return c.client
 }

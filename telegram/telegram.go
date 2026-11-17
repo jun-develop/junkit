@@ -5,20 +5,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"time"
-
-	"go.uber.org/zap"
-
-	"github.com/jun-develop/junkit/console"
 )
 
-// Client sends Telegram messages and documents using HTML parse mode. Both methods log and return
-// nil without sending when the token or chatID is empty (SendDocument also when content is nil);
-// SendDocument streams content, so memory use stays constant regardless of file size.
+// maxErrorBody caps how much of a failed response body is read into the returned error.
+const maxErrorBody = 4 << 10
+
+// Client sends Telegram messages and documents using HTML parse mode. Both methods return nil
+// without sending when the token or chatID is empty (SendDocument also when content is nil), so an
+// unconfigured bot is a silent no-op. SendDocument streams content, so memory use stays constant
+// regardless of file size. Returned errors never contain the bot token.
 type Client interface {
 	SendMessage(ctx context.Context, chatID, message string) error
 	SendDocument(ctx context.Context, chatID string, content io.Reader, filename string, caption string) error
@@ -35,7 +37,6 @@ type client struct {
 	httpClient *http.Client
 	botPrefix  string
 	token      string
-	logger     *zap.Logger
 }
 
 // sendMessageRequest is the JSON body for Telegram's sendMessage endpoint.
@@ -49,62 +50,36 @@ type sendMessageRequest struct {
 //
 // Usage:
 //
-//	c := telegram.NewClient(telegram.Options{Token: token}, nil, logger)
-func NewClient(opts Options, httpClient *http.Client, logger *zap.Logger) Client {
+//	c := telegram.NewClient(telegram.Options{Token: token}, nil)
+func NewClient(opts Options, httpClient *http.Client) Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
 
 	return &client{
 		httpClient: httpClient,
-		botPrefix:  fmt.Sprintf("https://api.telegram.org/bot%s", opts.Token),
+		botPrefix:  "https://api.telegram.org/bot" + opts.Token,
 		token:      opts.Token,
-		logger:     logger,
 	}
 }
 
 // SendMessage implements Client; it posts a JSON body to the sendMessage endpoint.
 func (c *client) SendMessage(ctx context.Context, chatID, message string) error {
 	if c.token == "" || chatID == "" {
-		c.logger.Warn("telegram: skip sending message due to missing token or chat_id")
 		return nil
 	}
 
-	reqBody := sendMessageRequest{ChatID: chatID, Text: message, ParseMode: "HTML"}
-	jsonData := new(bytes.Buffer)
-	if err := json.NewEncoder(jsonData).Encode(reqBody); err != nil {
-		c.logger.Error("telegram: encode message failed", zap.Error(err))
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.botPrefix+"/sendMessage", jsonData)
+	body, err := json.Marshal(sendMessageRequest{ChatID: chatID, Text: message, ParseMode: "HTML"})
 	if err != nil {
-		c.logger.Error("telegram: build request failed", zap.Error(err))
-		return err
+		return fmt.Errorf("telegram: send message: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		c.logger.Error("telegram: send message failed", zap.Error(err))
-		return err
-	}
-
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		c.logger.Error("telegram: api returned error", zap.Int("status", resp.StatusCode))
-		return c.handleError(resp)
-	}
-
-	return nil
+	return c.post(ctx, "sendMessage", "application/json", bytes.NewReader(body))
 }
 
 // SendDocument implements Client; it streams the multipart body through an io.Pipe.
 func (c *client) SendDocument(ctx context.Context, chatID string, content io.Reader, filename string, caption string) error {
 	if c.token == "" || chatID == "" || content == nil {
-		c.logger.Warn("telegram: skip sending document due to invalid parameters")
 		return nil
 	}
 
@@ -112,57 +87,77 @@ func (c *client) SendDocument(ctx context.Context, chatID string, content io.Rea
 	writer := multipart.NewWriter(pw)
 
 	go func() {
-		var err error
-		defer func() {
-			_ = writer.Close()
-			_ = pw.CloseWithError(err)
-		}()
-
-		if err = writer.WriteField("chat_id", chatID); err != nil {
-			return
+		err := writeDocument(writer, chatID, content, filename, caption)
+		if err == nil {
+			err = writer.Close()
 		}
 
-		if caption != "" {
-			_ = writer.WriteField("caption", caption)
-			_ = writer.WriteField("parse_mode", "HTML")
-		}
-
-		var part io.Writer
-		if part, err = writer.CreateFormFile("document", filename); err != nil {
-			return
-		}
-
-		_, err = io.Copy(part, content)
+		// CloseWithError always returns nil.
+		_ = pw.CloseWithError(err)
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.botPrefix+"/sendDocument", pr)
-	if err != nil {
-		c.logger.Error("telegram: build request failed", zap.Error(err))
-		_ = pr.CloseWithError(err)
+	err := c.post(ctx, "sendDocument", writer.FormDataContentType(), pr)
+
+	// Unblocks the writer goroutine when the request ended before reading the whole body;
+	// CloseWithError always returns nil.
+	_ = pr.CloseWithError(errors.New("telegram: request finished"))
+
+	return err
+}
+
+// writeDocument writes the sendDocument form fields and the document to writer.
+func writeDocument(writer *multipart.Writer, chatID string, content io.Reader, filename, caption string) error {
+	if err := writer.WriteField("chat_id", chatID); err != nil {
 		return err
 	}
 
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	if caption != "" {
+		if err := writer.WriteField("caption", caption); err != nil {
+			return err
+		}
+
+		if err := writer.WriteField("parse_mode", "HTML"); err != nil {
+			return err
+		}
+	}
+
+	part, err := writer.CreateFormFile("document", filename)
+	if err != nil {
+		return err
+	}
+
+	_, err = io.Copy(part, content)
+
+	return err
+}
+
+// post sends body to the Bot API method and returns an error for a failed or non-200 response.
+// Transport errors are unwrapped from *url.Error, whose text holds the URL and so the bot token.
+func (c *client) post(ctx context.Context, method, contentType string, body io.Reader) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.botPrefix+"/"+method, body)
+	if err != nil {
+		return fmt.Errorf("telegram: %s: build request failed", method)
+	}
+
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		c.logger.Error("telegram: upload document failed", zap.Error(err))
-		_ = pr.CloseWithError(err)
-		return err
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+
+		return fmt.Errorf("telegram: %s: %w", method, err)
 	}
 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		c.logger.Error("telegram: api returned error for document upload", zap.Int("status", resp.StatusCode))
-		return c.handleError(resp)
+		// The body only adds detail to the error; a failed read still reports the status.
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+		return fmt.Errorf("telegram: %s: status %d: %s", method, resp.StatusCode, msg)
 	}
 
 	return nil
-}
-
-// handleError wraps a non-200 response's status and body in an error.
-func (c *client) handleError(resp *http.Response) error {
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	return console.NewError("telegram api error (status %d): %s", resp.StatusCode, string(bodyBytes))
 }

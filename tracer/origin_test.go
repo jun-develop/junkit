@@ -14,6 +14,7 @@ func oneWrapperDeep() (string, int, string) {
 	return tracer.FindErrorOrigin()
 }
 
+// TestFindErrorOrigin_ReportsTheCallerOfItsWrapper checks the wrapper's caller is reported.
 func TestFindErrorOrigin_ReportsTheCallerOfItsWrapper(t *testing.T) {
 	file, line, fn := oneWrapperDeep()
 
@@ -30,12 +31,13 @@ func TestFindErrorOrigin_ReportsTheCallerOfItsWrapper(t *testing.T) {
 	}
 }
 
-func TestFindErrorOrigin_ThroughW(t *testing.T) {
+// TestFindErrorOrigin_ThroughWarn checks Warn reports its own call site as the issue location.
+func TestFindErrorOrigin_ThroughWarn(t *testing.T) {
 	ctx := tracer.WithContext(context.Background(), tracer.New())
 	d := tracer.FromContext(ctx)
 
 	_, _, callerLine, _ := runtime.Caller(0)
-	tracer.W(ctx, "test warning", "boom") // must stay on the line right after runtime.Caller
+	tracer.Warn(ctx, "test warning", "boom") // must stay on the line right after runtime.Caller
 	wantLine := callerLine + 1
 
 	logs := d.Logs()
@@ -53,10 +55,10 @@ func TestFindErrorOrigin_ThroughW(t *testing.T) {
 	}
 
 	if data.Line != wantLine {
-		t.Fatalf("Line = %d, want %d (the tracer.W call site, not one frame further up)", data.Line, wantLine)
+		t.Fatalf("Line = %d, want %d (the tracer.Warn call site, not one frame further up)", data.Line, wantLine)
 	}
 
-	if !strings.Contains(data.Function, "TestFindErrorOrigin_ThroughW") {
+	if !strings.Contains(data.Function, "TestFindErrorOrigin_ThroughWarn") {
 		t.Fatalf("Function = %q, want it to mention this test function", data.Function)
 	}
 }

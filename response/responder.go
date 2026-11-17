@@ -8,74 +8,63 @@ import (
 
 	"github.com/jun-develop/junkit/i18n"
 	"github.com/jun-develop/junkit/pagination"
-	"github.com/jun-develop/junkit/response/filter"
 )
 
-// Options configures a Responder.
-type Options struct {
-	// Language is the default locale for i18n messages (e.g. "en").
-	Language string
-}
-
-// Responder writes localized JSON responses in the Response envelope; key is an i18n message
-// key formatted with args. Send writes a message-only response. SendWithData puts data in "data"
-// for status < 400 and in "error" otherwise. Pagination wraps data and its metadata in
-// PaginatedData. Successful SendWithData and Pagination responses honour "?fields="/"?omit="
-// filtering. Translate resolves a key to a localized string. Error maps an *AppError to its
-// Code's HTTP status and translated Message; any other error is recorded on the gin context and
-// answered with a generic 500.
+// Responder writes localized JSON responses in the Response envelope, resolving i18n keys in the
+// translator's default language (i18n.Translator.SetDefaultLang).
 //
 // Usage:
 //
-//	responder.SendWithData(ctx, http.StatusOK, "user_fetched", user)
-//	responder.Error(ctx, err)
+//	responder.SendWithData(c, http.StatusOK, "user_fetched", user)
+//	responder.Error(c, err)
 type Responder interface {
-	Send(ctx *gin.Context, statusCode int, key string, args ...any)
-	SendWithData(ctx *gin.Context, statusCode int, key string, data any, args ...any)
-	Pagination(ctx *gin.Context, statusCode int, key string, data any, pagination pagination.Pagination, args ...any)
+	// Send writes a message-only response with key translated and formatted with args.
+	Send(c *gin.Context, statusCode int, key string, args ...any)
+
+	// SendWithData puts data in "data" for status < 400 and in "error" otherwise.
+	SendWithData(c *gin.Context, statusCode int, key string, data any, args ...any)
+
+	// Pagination writes data and its page metadata as PaginatedData in "data".
+	Pagination(c *gin.Context, statusCode int, key string, data any, page pagination.Pagination, args ...any)
+
+	// Translate resolves key to a localized string formatted with args.
 	Translate(key string, args ...any) string
-	Error(ctx *gin.Context, err error)
+
+	// Error maps an *AppError to its Code's status and message, anything else to a generic 500.
+	Error(c *gin.Context, err error)
 }
 
 // responder is the default Responder implementation.
 type responder struct {
 	translator *i18n.Translator
-	lang       string
 }
 
-// NewResponder creates a Responder with the given Options and i18n Translator.
+// NewResponder creates a Responder that translates messages with translator.
 //
 // Usage:
 //
-//	responder := response.NewResponder(response.Options{Language: "en"}, translator)
-func NewResponder(opts Options, translator *i18n.Translator) Responder {
-	return &responder{
-		translator: translator,
-		lang:       opts.Language,
-	}
+//	responder := response.NewResponder(translator)
+func NewResponder(translator *i18n.Translator) Responder {
+	return &responder{translator: translator}
 }
 
 // Send implements Responder.
-func (r *responder) Send(ctx *gin.Context, statusCode int, key string, args ...any) {
-	message := r.translator.GetMessage(key, r.lang, args...)
-
-	ctx.JSON(statusCode, Response{
+func (r *responder) Send(c *gin.Context, statusCode int, key string, args ...any) {
+	c.JSON(statusCode, Response{
 		Status:  statusText(statusCode),
 		Code:    httpStatusToErrorCode(statusCode),
-		Message: message,
-		APIInfo: getAPIInfo(ctx),
+		Message: r.Translate(key, args...),
+		APIInfo: getAPIInfo(c),
 	})
 }
 
 // SendWithData implements Responder.
-func (r *responder) SendWithData(ctx *gin.Context, statusCode int, key string, data any, args ...any) {
-	message := r.translator.GetMessage(key, r.lang, args...)
-
+func (r *responder) SendWithData(c *gin.Context, statusCode int, key string, data any, args ...any) {
 	res := Response{
 		Status:  statusText(statusCode),
 		Code:    httpStatusToErrorCode(statusCode),
-		Message: message,
-		APIInfo: getAPIInfo(ctx),
+		Message: r.Translate(key, args...),
+		APIInfo: getAPIInfo(c),
 	}
 
 	if statusCode >= http.StatusBadRequest {
@@ -84,72 +73,56 @@ func (r *responder) SendWithData(ctx *gin.Context, statusCode int, key string, d
 		res.Data = data
 	}
 
-	r.renderJSON(ctx, statusCode, res)
+	c.JSON(statusCode, res)
 }
 
 // Pagination implements Responder.
-func (r *responder) Pagination(ctx *gin.Context, statusCode int, key string, data any, pagination pagination.Pagination, args ...any) {
-	message := r.translator.GetMessage(key, r.lang, args...)
-
-	res := Response{
+func (r *responder) Pagination(c *gin.Context, statusCode int, key string, data any, page pagination.Pagination, args ...any) {
+	c.JSON(statusCode, Response{
 		Status:  statusText(statusCode),
-		Message: message,
+		Message: r.Translate(key, args...),
 		Data: PaginatedData{
 			Items:      data,
-			Pagination: pagination,
+			Pagination: page,
 		},
-		APIInfo: getAPIInfo(ctx),
-	}
-
-	r.renderJSON(ctx, statusCode, res)
+		APIInfo: getAPIInfo(c),
+	})
 }
 
 // Translate implements Responder.
 func (r *responder) Translate(key string, args ...any) string {
-	return r.translator.GetMessage(key, r.lang, args...)
+	// An empty language selects the translator's default language.
+	return r.translator.GetMessage(key, "", args...)
 }
 
-// Error implements Responder.
-func (r *responder) Error(ctx *gin.Context, err error) {
+// Error implements Responder. Errors worth logging (5xx or with a Cause) are recorded on the gin
+// context so the access log sees them.
+func (r *responder) Error(c *gin.Context, err error) {
 	var appErr *AppError
 	if errors.As(err, &appErr) {
 		statusCode := errorCodeToHTTPStatus(appErr.Code)
-		message := r.translator.GetMessage(appErr.Message, r.lang)
+		if statusCode >= http.StatusInternalServerError || appErr.Cause != nil {
+			// The returned *gin.Error is only a handle to what was recorded.
+			_ = c.Error(err)
+		}
 
-		ctx.JSON(statusCode, Response{
+		c.JSON(statusCode, Response{
 			Status:  "error",
 			Code:    appErr.Code,
-			Message: message,
-			APIInfo: getAPIInfo(ctx),
+			Message: r.Translate(appErr.Message),
+			APIInfo: getAPIInfo(c),
 		})
 
 		return
 	}
 
-	// gin's ctx.Error panics on nil; a nil err still gets the generic 500.
+	// gin's c.Error panics on nil; a nil err still gets the generic 500.
 	if err != nil {
-		_ = ctx.Error(err)
+		// The returned *gin.Error is only a handle to what was recorded.
+		_ = c.Error(err)
 	}
 
-	r.Send(ctx, http.StatusInternalServerError, "internal_server_error")
-}
-
-// renderJSON writes res, applying "?fields="/"?omit=" filtering to successful responses; if
-// filtering fails the unfiltered response is sent.
-func (r *responder) renderJSON(ctx *gin.Context, statusCode int, res Response) {
-	if statusCode < http.StatusBadRequest {
-		fields := ctx.GetStringSlice("_response_fields")
-		omit := ctx.GetStringSlice("_response_omit")
-
-		if len(fields) > 0 || len(omit) > 0 {
-			if filtered, err := filter.Filter(res, fields, omit); err == nil {
-				ctx.JSON(statusCode, filtered)
-				return
-			}
-		}
-	}
-
-	ctx.JSON(statusCode, res)
+	r.Send(c, http.StatusInternalServerError, "internal_server_error")
 }
 
 // errorCodeToHTTPStatus maps ErrorCode to HTTP status, defaulting to 500.

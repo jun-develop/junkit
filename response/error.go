@@ -20,6 +20,15 @@ const (
 	Internal             ErrorCode = "INTERNAL_SERVER_ERROR"
 )
 
+// Sentinel errors for cross-cutting failures common to every feature.
+var (
+	// ErrInternalServer is the generic mapping for untraced, unexpected failures.
+	ErrInternalServer = New(Internal, "internal_server_error")
+
+	// ErrDatabaseConnection marks a failure to reach or use the database.
+	ErrDatabaseConnection = New(Internal, "database_connection_error")
+)
+
 // AppError represents a domain error with an ErrorCode, i18n Message key, and optional Cause.
 type AppError struct {
 	Code    ErrorCode

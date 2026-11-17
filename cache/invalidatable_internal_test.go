@@ -7,16 +7,26 @@ import (
 	"time"
 )
 
+// failingMarkers is a Cache whose Lookup always fails, like an unreachable Redis.
+type failingMarkers struct {
+	Cache[int64]
+}
+
+// Lookup returns a backend error.
+func (failingMarkers) Lookup(context.Context, string) (int64, bool, error) {
+	return 0, false, errors.New("connection refused")
+}
+
 // newTestInvalidatable returns an in-memory Invalidatable whose clock the test sets through *now.
 func newTestInvalidatable(ttl time.Duration) (*Invalidatable[string], *time.Time) {
-	c := NewInvalidatable[string](Options{Driver: DriverMemory}, ttl)
+	c := NewInvalidatable[string](NewStore(Options{Driver: DriverMemory}), ttl)
 	now := time.Unix(1_000_000, 0)
 	c.now = func() time.Time { return now }
 
 	return c, &now
 }
 
-func TestInvalidatable(t *testing.T) {
+func TestInvalidatable_GetOrLoad(t *testing.T) {
 	ctx := context.Background()
 	markers := func(v string) []string { return []string{"group:" + v} }
 
@@ -98,6 +108,15 @@ func TestInvalidatable(t *testing.T) {
 		}
 	})
 
+	t.Run("a marker read error makes the entry stale", func(t *testing.T) {
+		c, _ := newTestInvalidatable(time.Minute)
+		_, _, _ = c.GetOrLoad(ctx, "k", markers, func() (string, error) { return "a", nil })
+		c.markers = failingMarkers{Cache: c.markers}
+		if _, hit, _ := c.GetOrLoad(ctx, "k", markers, func() (string, error) { return "a", nil }); hit {
+			t.Fatal("entry served although its marker could not be read")
+		}
+	})
+
 	t.Run("ttl <= 0 always loads", func(t *testing.T) {
 		c, _ := newTestInvalidatable(0)
 		loads := 0
@@ -109,18 +128,4 @@ func TestInvalidatable(t *testing.T) {
 			t.Fatalf("loads = %d, want 2", loads)
 		}
 	})
-}
-
-func TestOptions_OrMemory(t *testing.T) {
-	if got := (Options{}).OrMemory().Driver; got != DriverMemory {
-		t.Errorf("empty driver → %q, want memory", got)
-	}
-
-	if got := (Options{Driver: DriverNoop}).OrMemory().Driver; got != DriverMemory {
-		t.Errorf("noop → %q, want memory", got)
-	}
-
-	if got := (Options{Driver: DriverRedis}).OrMemory().Driver; got != DriverRedis {
-		t.Errorf("redis → %q, want redis", got)
-	}
 }

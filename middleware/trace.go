@@ -10,7 +10,7 @@ import (
 	"github.com/jun-develop/junkit/response"
 )
 
-// HeaderTraceID is the response (and, if present, request) header carrying the trace ID.
+// HeaderTraceID is the response (and, when trusted, request) header carrying the trace ID.
 const HeaderTraceID = "X-Trace-Id"
 
 // TraceOptions configures build and deployment metadata attached to requests.
@@ -21,9 +21,13 @@ type TraceOptions struct {
 	Commit string
 	// Environment is the running environment, e.g. "production".
 	Environment string
+	// TrustHeader reuses a well-formed X-Trace-Id sent by the client. Enable it only when a trusted
+	// gateway sets the header; otherwise clients can make their requests share another's trace ID.
+	TrustHeader bool
 }
 
-// Trace creates a Gin middleware that assigns or propagates a trace ID and sets request metadata.
+// Trace creates a Gin middleware that assigns (or, with TrustHeader, propagates) a trace ID, stored
+// in the request context via logger.WithTraceID, and sets request metadata.
 //
 // Usage:
 //
@@ -32,7 +36,11 @@ func Trace(opts TraceOptions) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 
-		traceID := c.GetHeader(HeaderTraceID)
+		var traceID string
+		if opts.TrustHeader {
+			traceID = c.GetHeader(HeaderTraceID)
+		}
+
 		if !validTraceID(traceID) {
 			traceID = uuid.NewString()
 		}
@@ -43,7 +51,6 @@ func Trace(opts TraceOptions) gin.HandlerFunc {
 		c.Writer.Header().Set(HeaderTraceID, traceID)
 
 		c.Set(response.StartTimeContextKey, start)
-		c.Set(response.TraceIDContextKey, traceID)
 		c.Set(response.VersionContextKey, opts.Version)
 		c.Set(response.EnvContextKey, opts.Environment)
 		c.Set(commitContextKey, opts.Commit)
@@ -52,7 +59,7 @@ func Trace(opts TraceOptions) gin.HandlerFunc {
 	}
 }
 
-// maxTraceIDLength bounds a client-supplied trace ID.
+// maxTraceIDLength bounds a trusted trace ID header.
 const maxTraceIDLength = 64
 
 // validTraceID reports whether a client-supplied trace ID can be reused: 1-64 letters, digits, '-'

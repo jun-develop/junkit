@@ -7,6 +7,7 @@ import (
 	"github.com/jun-develop/junkit/pagination"
 )
 
+// intPtr returns a pointer to v.
 func intPtr(v int) *int { return &v }
 
 func TestNewPagination(t *testing.T) {
@@ -82,6 +83,28 @@ func TestNewPagination(t *testing.T) {
 				NextPage: intPtr(2), PrevPage: nil,
 			},
 		},
+		{
+			name:       "page past the last clamps prev to the last page",
+			page:       50,
+			pageSize:   10,
+			totalItems: 25,
+			want: pagination.Pagination{
+				Page: 50, PageSize: 10, TotalItems: 25, TotalPages: 3,
+				HasNext: false, HasPrev: true,
+				NextPage: nil, PrevPage: intPtr(3),
+			},
+		},
+		{
+			name:       "page one past the last points prev at the last page",
+			page:       4,
+			pageSize:   10,
+			totalItems: 25,
+			want: pagination.Pagination{
+				Page: 4, PageSize: 10, TotalItems: 25, TotalPages: 3,
+				HasNext: false, HasPrev: true,
+				NextPage: nil, PrevPage: intPtr(3),
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -104,6 +127,7 @@ func TestNewPagination(t *testing.T) {
 	}
 }
 
+// assertIntPtrEqual fails the test if got and want differ in nil-ness or value.
 func assertIntPtrEqual(t *testing.T, field string, got, want *int) {
 	t.Helper()
 
@@ -117,6 +141,7 @@ func assertIntPtrEqual(t *testing.T, field string, got, want *int) {
 	}
 }
 
+// derefOrNil returns *p, or nil when p is nil.
 func derefOrNil(p *int) any {
 	if p == nil {
 		return nil
@@ -194,6 +219,11 @@ func TestRequest_GetOffset(t *testing.T) {
 		{name: "page past int32 clamps instead of going negative", req: pagination.Request{Page: 3_000_000_000, PageSize: 10}, want: math.MaxInt32},
 		{name: "page whose product overflows int64 clamps", req: pagination.Request{Page: math.MaxInt64, PageSize: 100}, want: math.MaxInt32},
 		{name: "last page that still fits int32", req: pagination.Request{Page: 214_748_365, PageSize: 10}, want: 2_147_483_640},
+		{name: "zero page is offset 0", req: pagination.Request{Page: 0, PageSize: 10}, want: 0},
+		{name: "negative page is offset 0", req: pagination.Request{Page: -5, PageSize: 10}, want: 0},
+		{name: "negative page size uses the clamped limit", req: pagination.Request{Page: 3, PageSize: -10}, want: 2},
+		{name: "zero page size uses the clamped limit", req: pagination.Request{Page: 3, PageSize: 0}, want: 2},
+		{name: "oversized page size uses the clamped limit", req: pagination.Request{Page: 2, PageSize: 1000}, want: 100},
 	}
 
 	for _, tt := range tests {
@@ -206,9 +236,26 @@ func TestRequest_GetOffset(t *testing.T) {
 }
 
 func TestRequest_GetLimit(t *testing.T) {
-	req := pagination.Request{PageSize: 25}
+	tests := []struct {
+		name     string
+		pageSize int
+		want     int32
+	}{
+		{name: "in range is kept", pageSize: 25, want: 25},
+		{name: "lower bound is kept", pageSize: 1, want: 1},
+		{name: "upper bound is kept", pageSize: 100, want: 100},
+		{name: "zero clamps to 1", pageSize: 0, want: 1},
+		{name: "negative clamps to 1", pageSize: -7, want: 1},
+		{name: "above 100 clamps to 100", pageSize: 101, want: 100},
+		{name: "huge clamps to 100", pageSize: math.MaxInt, want: 100},
+	}
 
-	if got, want := req.GetLimit(), int32(25); got != want {
-		t.Fatalf("GetLimit() = %d, want %d", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := pagination.Request{PageSize: tt.pageSize}
+			if got := req.GetLimit(); got != tt.want {
+				t.Fatalf("GetLimit() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }

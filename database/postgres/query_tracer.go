@@ -16,14 +16,16 @@ import (
 type queryTracer struct {
 	log                *zap.Logger
 	slowQueryThreshold time.Duration
+	inlineArgs         bool
 }
 
-// newQueryTracer returns a queryTracer whose logger drops zap's caller and error stack trace:
-// the caller is always this file, and the stack is mostly pgx/gin frames. A failed query logs
-// the application code location that ran it instead (see sqlfmt.Origin).
-func newQueryTracer(log *zap.Logger, slowQueryThreshold time.Duration) *queryTracer {
+// newQueryTracer returns a queryTracer whose logger drops zap's caller and error stack trace: the
+// caller is always this file, and the stack is mostly pgx/gin frames. A failed query logs the
+// application code location that ran it instead (see sqlfmt.Origin).
+func newQueryTracer(log *zap.Logger, slowQueryThreshold time.Duration, inlineArgs bool) *queryTracer {
 	log = log.WithOptions(zap.WithCaller(false), zap.AddStacktrace(zapcore.FatalLevel))
-	return &queryTracer{log: log, slowQueryThreshold: slowQueryThreshold}
+
+	return &queryTracer{log: log, slowQueryThreshold: slowQueryThreshold, inlineArgs: inlineArgs}
 }
 
 // Log implements tracelog.Logger; it logs only "Query" events, raising slow ones to WARN.
@@ -47,16 +49,22 @@ func (t *queryTracer) Log(ctx context.Context, level tracelog.LogLevel, msg stri
 	sql, _ := data["sql"].(string)
 	rawArgs, _ := data["args"].([]any)
 	info := sqlfmt.Parse(sql)
-	finalSQL := sqlfmt.Bind(info.SQL, rawArgs)
 
-	fields := make([]zap.Field, 0, 6)
+	finalSQL := info.SQL
+	if t.inlineArgs {
+		finalSQL = sqlfmt.Bind(info.SQL, rawArgs)
+	}
+
+	fields := make([]zap.Field, 0, 9)
 	fields = append(fields,
 		zap.String("trace_id", logger.GetTraceID(ctx)),
 		zap.Duration("latency", duration),
 		zap.String("query_name", info.Name),
 		zap.String("operation", info.Operation),
 		zap.String("sql", finalSQL),
+		zap.Int("arg_count", len(rawArgs)),
 	)
+
 	if err, ok := data["err"].(error); ok {
 		location, function := sqlfmt.Origin()
 		fields = append(fields,
@@ -88,19 +96,4 @@ func mapLogLevel(level tracelog.LogLevel) zapcore.Level {
 	default:
 		return zap.InfoLevel
 	}
-}
-
-// FormatValue renders v as a Postgres SQL literal (for query logging only).
-//
-// Usage:
-//
-//	postgres.FormatValue("O'Brien") // "'O''Brien'"
-func FormatValue(v any) string {
-	return sqlfmt.FormatValue(v)
-}
-
-// BindArgsToSQL replaces Postgres placeholders ($1, $2, ...) in sql with argument literals, for
-// logging only.
-func BindArgsToSQL(sql string, args []any) string {
-	return sqlfmt.Bind(sql, args)
 }

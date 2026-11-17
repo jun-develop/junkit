@@ -7,6 +7,7 @@ import (
 	"github.com/jun-develop/junkit/security"
 )
 
+// TestHashToken checks the hex SHA-256 output.
 func TestHashToken(t *testing.T) {
 	// sha256("abc")
 	const want = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
@@ -19,6 +20,7 @@ func TestHashToken(t *testing.T) {
 	}
 }
 
+// TestSecureEqual checks equal and unequal secrets.
 func TestSecureEqual(t *testing.T) {
 	if !security.SecureEqual("secret", "secret") {
 		t.Error("equal strings reported unequal")

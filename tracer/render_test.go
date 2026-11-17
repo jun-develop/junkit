@@ -13,10 +13,10 @@ import (
 // sampleCtx returns a context whose Debugger holds one entry of every type.
 func sampleCtx() context.Context {
 	ctx, d := newCtx()
-	tracer.C(ctx, "<script>alert(1)</script>")
-	tracer.V(ctx, "user", map[string]any{"id": 1})
-	tracer.W(ctx, "soft", "careful")
-	tracer.E(ctx, "hard", errors.New("broken"))
+	tracer.Comment(ctx, "<script>alert(1)</script>")
+	tracer.Var(ctx, "user", map[string]any{"id": 1})
+	tracer.Warn(ctx, "soft", "careful")
+	tracer.Error(ctx, "hard", errors.New("broken"))
 	tracer.Span(ctx, "compute")()
 	for range 3 {
 		d.Append(tracer.LogEntry{Type: tracer.TypeSQL, Label: "GetUser", DurationMS: 1, Data: tracer.SQLData{SQL: "SELECT 1"}})
@@ -27,6 +27,7 @@ func sampleCtx() context.Context {
 	return ctx
 }
 
+// TestNewReport_SummarizesDB checks NewReport totals the SQL entries of the request.
 func TestNewReport_SummarizesDB(t *testing.T) {
 	if tracer.NewReport(context.Background()) != nil {
 		t.Fatal("NewReport without a Debugger should be nil")
@@ -42,6 +43,7 @@ func TestNewReport_SummarizesDB(t *testing.T) {
 	}
 }
 
+// TestRenderHTML checks the dashboard shows every entry kind and explains a missing Debugger.
 func TestRenderHTML(t *testing.T) {
 	if !strings.Contains(tracer.RenderHTML(context.Background()), "no debugger attached") {
 		t.Fatal("RenderHTML without a Debugger should explain that none is attached")
@@ -64,6 +66,7 @@ func TestRenderHTML(t *testing.T) {
 	}
 }
 
+// TestRenderJSON checks RenderJSON decodes into a Report holding every entry.
 func TestRenderJSON(t *testing.T) {
 	var r tracer.Report
 	if err := json.Unmarshal(tracer.RenderJSON(sampleCtx()), &r); err != nil {
@@ -75,6 +78,7 @@ func TestRenderJSON(t *testing.T) {
 	}
 }
 
+// TestPrettyPrint checks PrettyPrint indents JSON and falls back to %+v.
 func TestPrettyPrint(t *testing.T) {
 	type row struct {
 		ID   int    `json:"id"`

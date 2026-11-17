@@ -1,16 +1,25 @@
 package telegram
 
-import "go.uber.org/fx"
+import (
+	"net/http"
 
-// Module provides an Fx provider for Client.
-//
-// Usage:
-//
-//	fx.New(
-//	    fx.Supply(telegram.Options{Token: cfg.Telegram.Token}),
-//	    httpclient.Module,
-//	    telegram.Module,
-//	)
-var Module = fx.Module("telegram",
-	fx.Provide(NewClient),
+	"go.uber.org/fx"
 )
+
+// Module provides Client to the Fx graph.
+var Module = fx.Module("telegram",
+	fx.Provide(newModuleClient),
+)
+
+// moduleParams are Module's dependencies; the *http.Client is optional.
+type moduleParams struct {
+	fx.In
+
+	Options    Options
+	HTTPClient *http.Client `optional:"true"`
+}
+
+// newModuleClient builds the Client Module provides.
+func newModuleClient(p moduleParams) Client {
+	return NewClient(p.Options, p.HTTPClient)
+}

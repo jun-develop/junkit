@@ -6,7 +6,7 @@ import (
 	"github.com/jun-develop/junkit/database"
 )
 
-func TestMaskDSN(t *testing.T) {
+func TestMaskDSN_RedactsSecrets(t *testing.T) {
 	tests := []struct {
 		name string
 		dsn  string
@@ -39,9 +39,34 @@ func TestMaskDSN(t *testing.T) {
 			want: "host=localhost port=5432 dbname=app sslmode=disable",
 		},
 		{
-			name: "URL-style credentials are not masked by this function",
+			name: "an escaped quote inside a quoted value does not end it",
+			dsn:  `password='ab\'cd ef' host=localhost`,
+			want: "password=******** host=localhost",
+		},
+		{
+			name: "double-quoted values are masked whole",
+			dsn:  `password="p@ss \" word" host=localhost`,
+			want: "password=******** host=localhost",
+		},
+		{
+			name: "URL password is masked",
 			dsn:  "postgres://user:pass@localhost:5432/app",
-			want: "postgres://user:pass@localhost:5432/app",
+			want: "postgres://user:********@localhost:5432/app",
+		},
+		{
+			name: "URL password containing @ is masked whole",
+			dsn:  "postgres://user:p@ss@localhost/app?sslmode=disable",
+			want: "postgres://user:********@localhost/app?sslmode=disable",
+		},
+		{
+			name: "URL without a password is unchanged",
+			dsn:  "postgres://user@localhost/app",
+			want: "postgres://user@localhost/app",
+		},
+		{
+			name: "URL query parameter password is masked, over-masking the parameters after it",
+			dsn:  "postgres://localhost/app?user=u&password=secret&sslmode=disable",
+			want: "postgres://localhost/app?user=u&password=********",
 		},
 	}
 
