@@ -70,7 +70,7 @@ Part III collects recipes that combine several packages.
 
 | Requirement | Why |
 |---|---|
-| **Go 1.26.5+** | The module's `go` directive |
+| **Go 1.27.4+** | The module's `go` directive |
 | **PostgreSQL** | Only if you use `database/postgres` (driver: [pgx v5](https://github.com/jackc/pgx)) |
 | **Redis** | Only if you use `cache` with `DriverRedis` |
 | **Telegram bot token + chat ID** | Only if you use `telegram` / `notification` |

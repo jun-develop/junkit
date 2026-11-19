@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/jun-develop/junkit/sqlfmt"
 	"github.com/jun-develop/junkit/tracer"
@@ -67,6 +68,9 @@ func (r *fakeRows) RawValues() [][]byte { return nil }
 
 // Conn is unused by the wrapper.
 func (r *fakeRows) Conn() *pgx.Conn { return nil }
+
+// TypeMap is unused by the wrapper.
+func (r *fakeRows) TypeMap() *pgtype.Map { return nil }
 
 // FieldDescriptions describes the configured columns.
 func (r *fakeRows) FieldDescriptions() []pgconn.FieldDescription {
