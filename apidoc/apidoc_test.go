@@ -1,9 +1,43 @@
 package apidoc_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: apidoc_test.go
+// Purpose: Verify OpenAPI spec generation from routes and serving of the docs page and spec.
+// Type: Unit
+//
+// Test functions: 2
+// Total scenarios: 17
+//
+// #   Test Case                       Scenario                              Expected Result
+// 1   TestSpec_DescribesOperations    Request body required fields          [name, email]
+// 2   TestSpec_DescribesOperations    String with min/max and example tags  minLength 2, maxLength 50, example Alice
+// 3   TestSpec_DescribesOperations    email + custom validator              format email; custom rule named in description
+// 4   TestSpec_DescribesOperations    Optional oneof pointer                Nullable string enum
+// 5   TestSpec_DescribesOperations    Slice with max and dive               Array with maxItems and item minLength
+// 6   TestSpec_DescribesOperations    Slice with dive,uuid                  Array of uuid strings
+// 7   TestSpec_DescribesOperations    Bearer security                       bearerAuth security requirement
+// 8   TestSpec_DescribesOperations    Route permissions                     x-permissions lists them
+// 9   TestSpec_DescribesOperations    Response struct                       uuid, date-time, nullable fields; json:"-" omitted
+// 10  TestSpec_DescribesOperations    Paginated query                       page_size param with 1..100 bounds (5 params in all)
+// 11  TestSpec_DescribesOperations    Path :uuid                            Required uuid path parameter
+// 12  TestSpec_DescribesOperations    API key header security               Security keyed by the header name
+// 13  TestSpec_DescribesOperations    File upload route                     Required multipart/form-data body with binary file
+// 14  TestSpec_DescribesOperations    File upload route                     Documents exactly 200 and 400 responses
+// 15  TestRegister_ServesPageAndSpec  GET /docs                             HTML page loading /docs/openapi.json
+// 16  TestRegister_ServesPageAndSpec  GET /docs                             HTML page titled with the API name
+// 17  TestRegister_ServesPageAndSpec  GET /docs/openapi.json                The spec as JSON
+//
+// =============================================================================
+
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -62,12 +96,12 @@ func testSpec(t *testing.T) obj {
 		},
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Spec() error = %v", err)
 	}
 
 	var doc obj
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatal(err)
+		t.Fatalf("Spec() returned invalid JSON: %v", err)
 	}
 
 	return doc
@@ -93,14 +127,22 @@ func at(t *testing.T, doc obj, keys ...string) obj {
 func assertJSON(t *testing.T, got, want any) {
 	t.Helper()
 
-	g, _ := json.Marshal(got)
-	w, _ := json.Marshal(want)
+	g, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal got: %v", err)
+	}
+
+	w, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal want: %v", err)
+	}
+
 	if string(g) != string(w) {
 		t.Errorf("got %s, want %s", g, w)
 	}
 }
 
-func TestSpec_Operations(t *testing.T) {
+func TestSpec_DescribesOperations(t *testing.T) {
 	doc := testSpec(t)
 	create := at(t, doc, "paths", "/api/v1/items", "post")
 	body := at(t, create, "requestBody", "content", "application/json", "schema")
@@ -110,7 +152,11 @@ func TestSpec_Operations(t *testing.T) {
 	del := at(t, doc, "paths", "/api/internal/items/{uuid}", "delete")
 	upload := at(t, doc, "paths", "/api/v1/items/{id}/files", "post")
 
-	listParams, _ := list["parameters"].([]any)
+	listParams, ok := list["parameters"].([]any)
+	if !ok {
+		t.Fatalf("list parameters = %T, want a JSON array", list["parameters"])
+	}
+
 	if len(listParams) != 5 {
 		t.Fatalf("query param count = %d, want 5", len(listParams))
 	}
@@ -120,32 +166,32 @@ func TestSpec_Operations(t *testing.T) {
 		got  any
 		want any
 	}{
-		{"required", body["required"], []string{"name", "email"}},
-		{"name", props["name"], obj{"type": "string", "minLength": 2, "maxLength": 50, "example": "Alice"}},
-		{"email", props["email"], obj{"type": "string", "format": "email", "description": "Validated by: email_advanced"}},
-		{"status", props["status"], obj{"type": "string", "nullable": true, "enum": []string{"active", "inactive"}}},
-		{"tags", props["tags"], obj{"type": "array", "maxItems": 3, "items": obj{"type": "string", "minLength": 1}}},
-		{"ids", props["ids"], obj{"type": "array", "items": obj{"type": "string", "format": "uuid"}}},
-		{"security", create["security"], []map[string][]string{{"bearerAuth": {}}}},
-		{"x-permissions", create["x-permissions"], []string{"items:create"}},
-		{"response", data["properties"], obj{
+		{"body lists required fields", body["required"], []string{"name", "email"}},
+		{"string with length limits and example", props["name"], obj{"type": "string", "minLength": 2, "maxLength": 50, "example": "Alice"}},
+		{"email format with custom validator noted", props["email"], obj{"type": "string", "format": "email", "description": "Validated by: email_advanced"}},
+		{"nullable enum", props["status"], obj{"type": "string", "nullable": true, "enum": []string{"active", "inactive"}}},
+		{"array with item limits", props["tags"], obj{"type": "array", "maxItems": 3, "items": obj{"type": "string", "minLength": 1}}},
+		{"array of uuids", props["ids"], obj{"type": "array", "items": obj{"type": "string", "format": "uuid"}}},
+		{"bearer security", create["security"], []map[string][]string{{"bearerAuth": {}}}},
+		{"required permissions", create["x-permissions"], []string{"items:create"}},
+		{"response data schema", data["properties"], obj{
 			"uuid":       obj{"type": "string", "format": "uuid"},
 			"created_at": obj{"type": "string", "format": "date-time"},
 			"note":       obj{"type": "string", "nullable": true},
 		}},
-		{"page_size", listParams[1], obj{"name": "page_size", "in": "query", "required": false,
+		{"pagination query parameter", listParams[1], obj{"name": "page_size", "in": "query", "required": false,
 			"schema": obj{"type": "integer", "minimum": 1, "maximum": 100, "example": 10}}},
-		{"path param", del["parameters"], []obj{{"name": "uuid", "in": "path", "required": true,
+		{"path parameter", del["parameters"], []obj{{"name": "uuid", "in": "path", "required": true,
 			"schema": map[string]string{"type": "string", "format": "uuid"}}}},
-		{"api key", del["security"], []map[string][]string{{"X-Internal-Secret": {}}}},
-		{"multipart body", upload["requestBody"], obj{"required": true, "content": obj{
+		{"api key header security", del["security"], []map[string][]string{{"X-Internal-Secret": {}}}},
+		{"multipart file upload body", upload["requestBody"], obj{"required": true, "content": obj{
 			"multipart/form-data": obj{"schema": obj{
 				"type":       "object",
 				"properties": obj{"file": obj{"type": "string", "format": "binary"}},
 				"required":   []string{"file"},
 			}},
 		}}},
-		{"multipart errors", len(at(t, upload, "responses")), 2},
+		{"multipart route response codes", slices.Sorted(maps.Keys(at(t, upload, "responses"))), []string{"200", "400"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -166,9 +212,9 @@ func TestRegister_ServesPageAndSpec(t *testing.T) {
 		contentType string
 		contains    string
 	}{
-		{"page", "/docs", "text/html; charset=utf-8", `{url: "/docs/openapi.json"`},
-		{"page title", "/docs", "text/html; charset=utf-8", "<title>My API</title>"},
-		{"spec", "/docs/openapi.json", "application/json", string(spec)},
+		{"page loads the spec url", "/docs", "text/html; charset=utf-8", `{url: "/docs/openapi.json"`},
+		{"page has the title", "/docs", "text/html; charset=utf-8", "<title>My API</title>"},
+		{"spec is served as json", "/docs/openapi.json", "application/json", string(spec)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -184,7 +230,7 @@ func TestRegister_ServesPageAndSpec(t *testing.T) {
 			}
 
 			if !strings.Contains(w.Body.String(), tt.contains) {
-				t.Errorf("body does not contain %q", tt.contains)
+				t.Errorf("body = %q, want it to contain %q", w.Body.String(), tt.contains)
 			}
 		})
 	}

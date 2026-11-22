@@ -1,5 +1,32 @@
 package database_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: dsn_test.go
+// Purpose: Verify that MaskDSN hides secrets in key=value and URL connection strings.
+// Type: Unit
+//
+// Test functions: 1
+// Total scenarios: 12
+//
+// #   Test Case                   Scenario                              Expected Result
+// 1   TestMaskDSN_RedactsSecrets  Empty string                          Returned unchanged
+// 2   TestMaskDSN_RedactsSecrets  password=... key                      Value replaced by ********
+// 3   TestMaskDSN_RedactsSecrets  Upper-case PASSWORD key               Value masked (case-insensitive)
+// 4   TestMaskDSN_RedactsSecrets  pwd, secret, token, api_key, api-key  All values masked
+// 5   TestMaskDSN_RedactsSecrets  Single-quoted value with spaces       Whole quoted value masked
+// 6   TestMaskDSN_RedactsSecrets  No secret keys                        Returned unchanged
+// 7   TestMaskDSN_RedactsSecrets  Escaped quote inside a quoted value   Whole quoted value masked
+// 8   TestMaskDSN_RedactsSecrets  Double-quoted value                   Whole quoted value masked
+// 9   TestMaskDSN_RedactsSecrets  URL with user:password                Password masked
+// 10  TestMaskDSN_RedactsSecrets  URL password containing @             Whole password masked
+// 11  TestMaskDSN_RedactsSecrets  URL without a password                Returned unchanged
+// 12  TestMaskDSN_RedactsSecrets  URL query parameter password          Masked, along with every parameter after it
+//
+// =============================================================================
+
 import (
 	"testing"
 

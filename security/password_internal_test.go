@@ -1,5 +1,22 @@
 package security
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: password_internal_test.go
+// Purpose: Verify the concurrency limit (slots) inside the bcrypt password hasher.
+// Type: Unit
+//
+// Test functions: 2
+// Total scenarios: 2
+//
+// #  Test Case                                    Scenario                                    Expected Result
+// 1  TestPasswordHasher_WaitsForAFreeSlot         Every slot busy, then the slot is released  Calls fail with context.Canceled, then succeed
+// 2  TestPasswordHasher_DefaultLimitIsAtLeastOne  MaxConcurrent not set                       At least one slot is available
+//
+// =============================================================================
+
 import (
 	"context"
 	"errors"
@@ -8,56 +25,65 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// TestPasswordHasher_WaitsForAFreeSlot checks that a call waits while every slot is busy, gives
-// up with ctx's error, and runs once a slot is free.
 func TestPasswordHasher_WaitsForAFreeSlot(t *testing.T) {
+	// Arrange: a hasher with one slot, a valid hash, and the only slot taken.
 	ph, err := NewPasswordHasher(Options{Password: PasswordOptions{Cost: bcrypt.MinCost, MaxConcurrent: 1}})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("NewPasswordHasher() error = %v", err)
 	}
 
 	h := ph.(*passwordHasher)
 	hash, err := h.Hash(context.Background(), "secret")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Hash() error = %v", err)
 	}
 
-	// Take the only slot so every call must wait.
 	release, err := h.acquire(context.Background())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("acquire() error = %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := h.Hash(ctx, "secret"); !errors.Is(err, context.Canceled) {
-		t.Errorf("Hash err = %v, want context.Canceled", err)
+	// Act + Assert: while the slot is busy, every call gives up with the context error.
+	if _, err := h.Hash(canceled, "secret"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Hash() while busy error = %v, want context.Canceled", err)
 	}
 
-	if ok, err := h.Compare(ctx, hash, "secret"); ok || !errors.Is(err, context.Canceled) {
-		t.Errorf("Compare = %v, %v; want false, context.Canceled", ok, err)
+	ok, err := h.Compare(canceled, hash, "secret")
+	if ok {
+		t.Error("Compare() while busy = true, want false")
 	}
 
-	if err := h.CompareDummy(ctx, "secret"); !errors.Is(err, context.Canceled) {
-		t.Errorf("CompareDummy err = %v, want context.Canceled", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Compare() while busy error = %v, want context.Canceled", err)
 	}
 
+	if err := h.CompareDummy(canceled, "secret"); !errors.Is(err, context.Canceled) {
+		t.Errorf("CompareDummy() while busy error = %v, want context.Canceled", err)
+	}
+
+	// Act + Assert: once the slot is free, calls run normally.
 	release()
 
-	if ok, err := h.Compare(context.Background(), hash, "secret"); !ok || err != nil {
-		t.Errorf("Compare after release = %v, %v; want true, nil", ok, err)
+	ok, err = h.Compare(context.Background(), hash, "secret")
+	if err != nil {
+		t.Fatalf("Compare() after release error = %v, want nil", err)
+	}
+
+	if !ok {
+		t.Error("Compare() after release = false, want true")
 	}
 }
 
-// TestPasswordHasher_DefaultLimitIsAtLeastOne checks the MaxConcurrent default.
 func TestPasswordHasher_DefaultLimitIsAtLeastOne(t *testing.T) {
 	ph, err := NewPasswordHasher(Options{Password: PasswordOptions{Cost: bcrypt.MinCost}})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("NewPasswordHasher() error = %v", err)
 	}
 
-	if c := cap(ph.(*passwordHasher).slots); c < 1 {
-		t.Errorf("slots = %d, want >= 1", c)
+	if slots := cap(ph.(*passwordHasher).slots); slots < 1 {
+		t.Errorf("slot count = %d, want >= 1", slots)
 	}
 }

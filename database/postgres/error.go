@@ -15,8 +15,7 @@ func init() {
 	database.RegisterClassifier(classify)
 }
 
-// classify implements database.Classifier for pgx errors. Its detail may echo raw Postgres messages
-// and is for internal logs only (see database.Classify).
+// classify implements database.Classifier for Postgres (pgx) errors.
 func classify(err error) (database.ErrorType, string, bool) {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return database.ErrorNotFound, "resource not found", true
@@ -31,8 +30,7 @@ func classify(err error) (database.ErrorType, string, bool) {
 	return database.ErrorNone, "", false
 }
 
-// classifyPgError maps a Postgres SQLSTATE code to an ErrorType. The P0001 and default details
-// carry pgErr.Message verbatim, which is internal-only.
+// classifyPgError maps a Postgres SQLSTATE code to an ErrorType.
 // See https://www.postgresql.org/docs/current/errcodes-appendix.html.
 func classifyPgError(pgErr *pgconn.PgError) (database.ErrorType, string) {
 	switch pgErr.Code {

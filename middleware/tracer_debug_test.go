@@ -1,5 +1,33 @@
 package middleware_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: tracer_debug_test.go
+// Purpose: Verify the TracerDebug middleware renders the debug dashboard only for authorized debug requests.
+// Type: Unit
+//
+// Test functions: 9
+// Total scenarios: 13
+//
+// #   Test Case                                                Scenario                                     Expected Result
+// 1   TestTracerDebug_PassesThroughWhenNotActivated            Normal request without the debug query       Handler's own status and body
+// 2   TestTracerDebug_RequiresQueryAndSecret                   Empty options                                Handler's own response
+// 3   TestTracerDebug_RequiresQueryAndSecret                   Empty configured secret                      Handler's own response
+// 4   TestTracerDebug_RequiresQueryAndSecret                   Missing secret header                        Handler's own response
+// 5   TestTracerDebug_RequiresQueryAndSecret                   Wrong secret                                 Handler's own response
+// 6   TestTracerDebug_RequiresQueryAndSecret                   Wrong query value                            Handler's own response
+// 7   TestTracerDebug_RendersDashboardWhenActivated            Debug query and secret from a browser        200 HTML dashboard replaces the handler's response
+// 8   TestTracerDebug_RendersJSONForCLIClients                 Debug request from curl                      Non-empty valid JSON report
+// 9   TestTracerDebug_BreakpointSignalRendersDashboardInstead  Handler panics with tracer.BreakpointSignal  200 with the rendered dashboard
+// 10  TestTracerDebug_OtherPanicsPropagate                     Handler panics with another value            The panic propagates unchanged
+// 11  TestTracerDebug_DropsInnerGzipEncoding                   Debug request through Gzip                   No Content-Encoding, plain HTML dashboard
+// 12  TestTracerDebug_StaysOKWhenInnerMiddlewareAborts         CORS preflight aborts with 204               200 with the JSON dashboard
+// 13  TestTracerDebug_StaysOKWhenHandlerCommitsHeaders         Handler sets 418 and calls WriteHeaderNow    200 with the HTML dashboard
+//
+// =============================================================================
+
 import (
 	"encoding/json"
 	"net/http"
@@ -13,21 +41,7 @@ import (
 	"github.com/jun-develop/junkit/tracer"
 )
 
-var debugOpts = middleware.TracerDebugOptions{
-	QueryKey:     "t_debug",
-	QueryValue:   "1234",
-	SecretHeader: "X-Internal-Secret",
-	Secret:       "s3cret",
-}
-
-// newDebugRequest builds a GET for target carrying debugOpts' secret header.
-func newDebugRequest(target string) *http.Request {
-	req := httptest.NewRequest(http.MethodGet, target, nil)
-	req.Header.Set(debugOpts.SecretHeader, debugOpts.Secret)
-
-	return req
-}
-
+// newTracerDebugRouter returns a router with TracerDebug and a GET / route served by handler.
 func newTracerDebugRouter(opts middleware.TracerDebugOptions, handler gin.HandlerFunc) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -67,8 +81,8 @@ func TestTracerDebug_RequiresQueryAndSecret(t *testing.T) {
 		req  *http.Request
 	}{
 		{"empty options", middleware.TracerDebugOptions{}, newDebugRequest("/?t_debug=")},
-		{"empty secret", emptySecret, httptest.NewRequest(http.MethodGet, "/?t_debug=1234", nil)},
-		{"missing header", debugOpts, httptest.NewRequest(http.MethodGet, "/?t_debug=1234", nil)},
+		{"empty configured secret", emptySecret, httptest.NewRequest(http.MethodGet, "/?t_debug=1234", nil)},
+		{"missing secret header", debugOpts, httptest.NewRequest(http.MethodGet, "/?t_debug=1234", nil)},
 		{"wrong secret", debugOpts, wrongSecret},
 		{"wrong query value", debugOpts, newDebugRequest("/?t_debug=0000")},
 	}
@@ -103,7 +117,7 @@ func TestTracerDebug_RendersDashboardWhenActivated(t *testing.T) {
 	}
 
 	if strings.Contains(w.Body.String(), "normal response") {
-		t.Fatal("the handler's real response body leaked through instead of being replaced by the dashboard")
+		t.Fatal("body contains the handler's response, want it replaced by the dashboard")
 	}
 
 	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
@@ -123,7 +137,7 @@ func TestTracerDebug_RendersJSONForCLIClients(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	if w.Body.Len() == 0 {
-		t.Fatal("expected a non-empty rendered body for a curl client")
+		t.Fatal("body is empty, want the rendered report for a curl client")
 	}
 
 	// A curl client gets the JSON report (pipeable into jq), not HTML markup.
@@ -145,11 +159,11 @@ func TestTracerDebug_BreakpointSignalRendersDashboardInstead(t *testing.T) {
 	router.ServeHTTP(w, newDebugRequest("/?t_debug=1234"))
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d — a BreakpointSignal should still render the dashboard", w.Code, http.StatusOK)
+		t.Fatalf("status = %d, want %d: a BreakpointSignal should still render the dashboard", w.Code, http.StatusOK)
 	}
 
 	if w.Body.Len() == 0 {
-		t.Fatal("expected a rendered dashboard body after a BreakpointSignal")
+		t.Fatal("body is empty, want the rendered dashboard after a BreakpointSignal")
 	}
 }
 
@@ -205,7 +219,29 @@ func TestTracerDebug_StaysOKWhenInnerMiddlewareAborts(t *testing.T) {
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK || !json.Valid(w.Body.Bytes()) {
-		t.Fatalf("status = %d body = %q, want 200 with the JSON dashboard (CORS's 204 discarded)", w.Code, w.Body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (CORS's 204 discarded)", w.Code)
+	}
+
+	if !json.Valid(w.Body.Bytes()) {
+		t.Fatalf("body = %q, want the JSON dashboard", w.Body)
+	}
+}
+
+func TestTracerDebug_StaysOKWhenHandlerCommitsHeaders(t *testing.T) {
+	router := newTracerDebugRouter(debugOpts, func(c *gin.Context) {
+		c.Status(http.StatusTeapot)
+		c.Writer.WriteHeaderNow()
+	})
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, newDebugRequest("/?t_debug=1234"))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: an early header commit must not reach the client", w.Code, http.StatusOK)
+	}
+
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html for the dashboard", ct)
 	}
 }

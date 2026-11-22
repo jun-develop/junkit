@@ -1,5 +1,53 @@
 package scaffold_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: scaffold_test.go
+// Purpose: Verify feature naming, migration numbering, and generating/removing feature files.
+// Type: Unit (uses temporary directories)
+//
+// Test functions: 12
+// Total scenarios: 33
+//
+// #   Test Case                                            Scenario                              Expected Result
+// 1   TestNewFeatureData_DerivesNames                      Simple word                           Pascal/camel names, plural table, module set
+// 2   TestNewFeatureData_DerivesNames                      snake_case words                      OrderItem / orderItem / order_items
+// 3   TestNewFeatureData_DerivesNames                      Explicit table                        Table is the given name
+// 4   TestNewFeatureData_DerivesNames                      Consonant + y                         Table ends in ies
+// 5   TestNewFeatureData_DerivesNames                      Vowel + y                             Table just adds s
+// 6   TestNewFeatureData_DerivesNames                      Ends in x                             Table adds es
+// 7   TestNewFeatureData_DerivesNames                      Ends in s                             Table adds es
+// 8   TestNewFeatureData_DerivesNames                      Ends in ch                            Table adds es
+// 9   TestNewFeatureData_DerivesNames                      Ends in sh                            Table adds es
+// 10  TestNewFeatureData_DerivesPluralAndModel             Simple word, default table            products / Product
+// 11  TestNewFeatureData_DerivesPluralAndModel             Explicit table names the model        Plural from the feature, model from the table
+// 12  TestNewFeatureData_DerivesPluralAndModel             Explicit table equal to the plural    users / User
+// 13  TestNewFeatureData_DerivesPluralAndModel             snake_case word                       order_items / OrderItem
+// 14  TestNewFeatureData_DerivesPluralAndModel             Consonant + y                         categories / Category
+// 15  TestNewFeatureData_DerivesPluralAndModel             Ends in x                             boxes / Box
+// 16  TestNewFeatureData_DerivesPluralAndModel             Ends in us (status)                   statuses / Status
+// 17  TestNewFeatureData_DerivesPluralAndModel             Ends in us (bus)                      buses / Bus
+// 18  TestNewFeatureData_DerivesPluralAndModel             Ends in ss                            classes / Class
+// 19  TestNewFeatureData_DerivesPluralAndModel             Ends in ch                            branches / Branch
+// 20  TestNewFeatureData_DerivesPluralAndModel             Vowel + y                             keys / Key
+// 21  TestNewFeatureData_DerivesPluralAndModel             Ends in se, explicit table            houses / House
+// 22  TestNextMigrationSeq_ReturnsNextSequence             Directory does not exist              000001
+// 23  TestNextMigrationSeq_ReturnsNextSequence             Empty directory                       000001
+// 24  TestNextMigrationSeq_ReturnsNextSequence             Highest existing is 000003            000004
+// 25  TestGenerate_WritesFilesAndRegistersModule           Two templates and an fx.go            Files rendered; import and module line added to fx.go
+// 26  TestGenerate_RefusesToOverwriteExistingFile          Target file already exists            Returns an error; file unchanged
+// 27  TestGenerate_RenderErrorWritesNothing                Second template fails to render       Returns an error; no file written; rerun not blocked
+// 28  TestGenerate_WriteErrorRollsBackWrittenFiles         Second file cannot be written         Returns an error; first file removed again
+// 29  TestRemove_DeletesFeatureAndUnregistersModule        Feature dir, extra file, fx.go entry  All removed; fx.go no longer mentions the feature
+// 30  TestRemove_MissingExtraFileIsNotAnError              Extra file already absent             Returns no error
+// 31  TestRemove_MissingFeatureDirIsNotAnError             Feature dir already absent            Returns no error
+// 32  TestRemove_StopsBeforeDeletingWhenFxFileIsMissing    fx file does not exist                Returns an error; feature dir kept
+// 33  TestRemove_ReturnsErrorWhenExtraFileCannotBeRemoved  Extra file is a non-empty directory   Returns an error
+//
+// =============================================================================
+
 import (
 	"os"
 	"path/filepath"
@@ -9,7 +57,7 @@ import (
 	"github.com/jun-develop/junkit/scaffold"
 )
 
-func TestNewFeatureData(t *testing.T) {
+func TestNewFeatureData_DerivesNames(t *testing.T) {
 	tests := []struct {
 		name       string
 		featName   string
@@ -56,26 +104,30 @@ func TestNewFeatureData(t *testing.T) {
 	}
 }
 
-func TestNewFeatureData_PluralAndModel(t *testing.T) {
+func TestNewFeatureData_DerivesPluralAndModel(t *testing.T) {
 	tests := []struct {
-		featName, table, wantPlural, wantModel string
+		name       string
+		featName   string
+		table      string
+		wantPlural string
+		wantModel  string
 	}{
-		{"product", "", "products", "Product"},
-		{"product", "items", "products", "Item"},
-		{"user", "users", "users", "User"},
-		{"order_item", "", "order_items", "OrderItem"},
-		{"category", "", "categories", "Category"},
-		{"box", "", "boxes", "Box"},
-		{"status", "", "statuses", "Status"},
-		{"bus", "", "buses", "Bus"},
-		{"class", "", "classes", "Class"},
-		{"branch", "", "branches", "Branch"},
-		{"key", "", "keys", "Key"},
-		{"house", "houses", "houses", "House"},
+		{"simple word, default table", "product", "", "products", "Product"},
+		{"explicit table names the model", "product", "items", "products", "Item"},
+		{"explicit table equal to the plural", "user", "users", "users", "User"},
+		{"snake_case word", "order_item", "", "order_items", "OrderItem"},
+		{"consonant + y", "category", "", "categories", "Category"},
+		{"ends in x", "box", "", "boxes", "Box"},
+		{"ends in us (status)", "status", "", "statuses", "Status"},
+		{"ends in us (bus)", "bus", "", "buses", "Bus"},
+		{"ends in ss", "class", "", "classes", "Class"},
+		{"ends in ch", "branch", "", "branches", "Branch"},
+		{"vowel + y", "key", "", "keys", "Key"},
+		{"ends in se with explicit table", "house", "houses", "houses", "House"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.featName+"/"+tt.table, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			data := scaffold.NewFeatureData(tt.featName, "jungo", tt.table)
 
 			if data.Plural != tt.wantPlural {
@@ -89,7 +141,7 @@ func TestNewFeatureData_PluralAndModel(t *testing.T) {
 	}
 }
 
-func TestNextMigrationSeq(t *testing.T) {
+func TestNextMigrationSeq_ReturnsNextSequence(t *testing.T) {
 	t.Run("missing directory returns 000001", func(t *testing.T) {
 		seq, err := scaffold.NextMigrationSeq(filepath.Join(t.TempDir(), "does-not-exist"))
 		if err != nil {
@@ -131,7 +183,7 @@ func TestNextMigrationSeq(t *testing.T) {
 	})
 }
 
-func TestGenerate(t *testing.T) {
+func TestGenerate_WritesFilesAndRegistersModule(t *testing.T) {
 	dir := t.TempDir()
 	fxFile := filepath.Join(dir, "fx.go")
 	fxContent := `package app
@@ -223,7 +275,11 @@ func TestGenerate_RefusesToOverwriteExistingFile(t *testing.T) {
 		t.Fatal("Generate() error = nil, want it to refuse overwriting an existing file")
 	}
 
-	content, _ := os.ReadFile(existing)
+	content, err := os.ReadFile(existing)
+	if err != nil {
+		t.Fatalf("read existing file: %v", err)
+	}
+
 	if string(content) != "package x\n" {
 		t.Fatalf("existing file was modified despite the refusal: %q", content)
 	}
@@ -249,7 +305,8 @@ func TestGenerate_RenderErrorWritesNothing(t *testing.T) {
 		t.Fatalf("%s exists after a failed Generate, want nothing written (stat err = %v)", first, err)
 	}
 
-	// A rerun with a fixed template must not be blocked by leftovers.
+	// A rerun with a fixed template must not be blocked by leftovers. Other errors (the fx file
+	// is missing on purpose) are not what this check is about.
 	cfg.Files[1].Template = "package b\n"
 	cfg.FxFile = filepath.Join(dir, "missing-fx.go")
 	if err := scaffold.Generate(cfg); err != nil && strings.Contains(err.Error(), "refusing to overwrite") {
@@ -257,7 +314,33 @@ func TestGenerate_RenderErrorWritesNothing(t *testing.T) {
 	}
 }
 
-func TestRemove(t *testing.T) {
+func TestGenerate_WriteErrorRollsBackWrittenFiles(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "a", "first.go")
+	// A regular file where a parent directory is needed makes the second write fail.
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatalf("test setup: %v", err)
+	}
+
+	cfg := scaffold.GenerateOptions{
+		Data: scaffold.NewFeatureData("product", "jungo", ""),
+		Files: []scaffold.File{
+			{Path: first, Template: "package a\n"},
+			{Path: filepath.Join(blocker, "second.go"), Template: "package b\n"},
+		},
+	}
+
+	if err := scaffold.Generate(cfg); err == nil {
+		t.Fatal("Generate() error = nil, want the write error")
+	}
+
+	if _, err := os.Stat(first); !os.IsNotExist(err) {
+		t.Errorf("%s exists after a failed write, want it rolled back (stat err = %v)", first, err)
+	}
+}
+
+func TestRemove_DeletesFeatureAndUnregistersModule(t *testing.T) {
 	dir := t.TempDir()
 	fxFile := filepath.Join(dir, "fx.go")
 	fxContent := "package app\n\nimport (\n\t\"jungo/internal/features/product\"\n)\n\nvar _ = []any{\n\tproduct.Module,\n}\n"
@@ -292,14 +375,18 @@ func TestRemove(t *testing.T) {
 	}
 
 	if _, err := os.Stat(featureDir); !os.IsNotExist(err) {
-		t.Error("feature directory should have been removed")
+		t.Errorf("feature directory still exists (stat err = %v), want it removed", err)
 	}
 
 	if _, err := os.Stat(extraFile); !os.IsNotExist(err) {
-		t.Error("extra file should have been removed")
+		t.Errorf("extra file still exists (stat err = %v), want it removed", err)
 	}
 
-	fxOut, _ := os.ReadFile(fxFile)
+	fxOut, err := os.ReadFile(fxFile)
+	if err != nil {
+		t.Fatalf("read fx.go: %v", err)
+	}
+
 	if strings.Contains(string(fxOut), "product") {
 		t.Fatalf("fx.go still references product after removal: %q", fxOut)
 	}
@@ -321,5 +408,72 @@ func TestRemove_MissingExtraFileIsNotAnError(t *testing.T) {
 
 	if err := scaffold.Remove(cfg); err != nil {
 		t.Fatalf("Remove() error = %v, want nil when an ExtraFile is already absent", err)
+	}
+}
+
+func TestRemove_MissingFeatureDirIsNotAnError(t *testing.T) {
+	dir := t.TempDir()
+	fxFile := filepath.Join(dir, "fx.go")
+	if err := os.WriteFile(fxFile, []byte("package app\n"), 0o644); err != nil {
+		t.Fatalf("test setup: %v", err)
+	}
+
+	cfg := scaffold.RemoveOptions{
+		Dirs:       []string{filepath.Join(dir, "features", "gone")},
+		FxFile:     fxFile,
+		ImportPath: "jungo/internal/features/gone",
+		ModuleLine: "gone.Module,",
+	}
+
+	if err := scaffold.Remove(cfg); err != nil {
+		t.Fatalf("Remove() error = %v, want nil when a Dir is already absent", err)
+	}
+}
+
+func TestRemove_StopsBeforeDeletingWhenFxFileIsMissing(t *testing.T) {
+	dir := t.TempDir()
+	featureDir := filepath.Join(dir, "features", "product")
+	if err := os.MkdirAll(featureDir, 0o755); err != nil {
+		t.Fatalf("test setup: %v", err)
+	}
+
+	cfg := scaffold.RemoveOptions{
+		Dirs:       []string{featureDir},
+		FxFile:     filepath.Join(dir, "missing-fx.go"),
+		ImportPath: "jungo/internal/features/product",
+		ModuleLine: "product.Module,",
+	}
+
+	if err := scaffold.Remove(cfg); err == nil {
+		t.Fatal("Remove() error = nil, want an error for a missing fx file")
+	}
+
+	if _, err := os.Stat(featureDir); err != nil {
+		t.Errorf("feature directory stat error = %v, want it kept when unregistering failed", err)
+	}
+}
+
+func TestRemove_ReturnsErrorWhenExtraFileCannotBeRemoved(t *testing.T) {
+	dir := t.TempDir()
+	fxFile := filepath.Join(dir, "fx.go")
+	if err := os.WriteFile(fxFile, []byte("package app\n"), 0o644); err != nil {
+		t.Fatalf("test setup: %v", err)
+	}
+
+	// os.Remove fails on a non-empty directory with an error other than "not exist".
+	notAFile := filepath.Join(dir, "queries")
+	if err := os.MkdirAll(filepath.Join(notAFile, "child"), 0o755); err != nil {
+		t.Fatalf("test setup: %v", err)
+	}
+
+	cfg := scaffold.RemoveOptions{
+		ExtraFiles: []string{notAFile},
+		FxFile:     fxFile,
+		ImportPath: "jungo/internal/features/product",
+		ModuleLine: "product.Module,",
+	}
+
+	if err := scaffold.Remove(cfg); err == nil {
+		t.Fatal("Remove() error = nil, want the removal error")
 	}
 }

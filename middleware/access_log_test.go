@@ -1,5 +1,34 @@
 package middleware_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: access_log_test.go
+// Purpose: Verify the AccessLog middleware: one structured entry per request, severity, masking and exclusions.
+// Type: Unit
+//
+// Test functions: 11
+// Total scenarios: 14
+//
+// #   Test Case                                          Scenario                                     Expected Result
+// 1   TestAccessLog_LogsOneEntryPerRequest               GET /ping returns 200                        One HTTP_ACCESS_LOG Info entry with status, method, path, trace_id
+// 2   TestAccessLog_SeverityMatchesStatusCode            2xx response                                 Logged at Info
+// 3   TestAccessLog_SeverityMatchesStatusCode            4xx response                                 Logged at Warn
+// 4   TestAccessLog_SeverityMatchesStatusCode            5xx response                                 Logged at Error
+// 5   TestAccessLog_MasksSensitiveRequestFields          JSON body with password and email            password masked, email kept
+// 6   TestAccessLog_MasksFieldsNamedLikeCredentials      Fields named like password/token/secret      Those fields masked, name kept
+// 7   TestAccessLog_MasksSensitiveQueryParameters        Query with reset_token                       Token value masked, page kept
+// 8   TestAccessLog_MasksSensitiveQueryParameters        Query without secrets                        Query logged unchanged, order kept
+// 9   TestAccessLog_BodiesOnErrorOnly                    BodiesOnErrorOnly, a 2xx then a 4xx request  Bodies left out for 2xx, logged for 4xx
+// 10  TestAccessLog_ExcludedPathIsNotLogged              GET /health (excluded by default)            No log entry
+// 11  TestAccessLog_SkipIfBypassesLogging                SkipIf returns true                          No log entry
+// 12  TestAccessLog_CustomExcludedPathsOverrideDefaults  ExcludedPaths = [/ping]                      /health is logged, /ping is not
+// 13  TestAccessLog_MasksNestedFieldsInTopLevelArray     Secrets nested in arrays of the response     accessToken and API-Key masked, name kept
+// 14  TestAccessLog_RespSizeIsUncompressedInsideGzip     1000-byte body behind Gzip                   resp_size is the uncompressed 1000
+//
+// =============================================================================
+
 import (
 	"fmt"
 	"net/http"
@@ -16,7 +45,8 @@ import (
 	"github.com/jun-develop/junkit/middleware"
 )
 
-// newAccessLogRouter creates a test Gin router with AccessLog and observed logs.
+// newAccessLogRouter returns a router with AccessLog (trace ID "trace-123"), routes /ping, /login
+// and /health served by handler, and the observed log entries.
 func newAccessLogRouter(opts middleware.AccessLogOptions, handler gin.HandlerFunc) (*gin.Engine, *observer.ObservedLogs) {
 	gin.SetMode(gin.TestMode)
 	core, logs := observer.New(zapcore.InfoLevel)
@@ -33,6 +63,34 @@ func newAccessLogRouter(opts middleware.AccessLogOptions, handler gin.HandlerFun
 	router.GET("/health", handler)
 
 	return router, logs
+}
+
+// newAccessLogRouterWithPayload returns a router with Payload before AccessLog, so request bodies
+// are logged, and a POST /login route answering 200.
+func newAccessLogRouterWithPayload(t *testing.T) (*gin.Engine, *observer.ObservedLogs) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	core, logs := observer.New(zapcore.InfoLevel)
+
+	router := gin.New()
+	router.Use(middleware.Payload(middleware.PayloadOptions{MaxBodySize: 1 << 20}, newResponder()))
+	router.Use(middleware.AccessLog(middleware.AccessLogOptions{}, zap.New(core)))
+	router.POST("/login", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	return router, logs
+}
+
+// onlyEntryFields fails unless exactly one entry was logged and returns its fields.
+func onlyEntryFields(t *testing.T, logs *observer.ObservedLogs) map[string]any {
+	t.Helper()
+	all := logs.All()
+	if len(all) != 1 {
+		t.Fatalf("got %d log entries, want 1", len(all))
+	}
+
+	return all[0].ContextMap()
 }
 
 func TestAccessLog_LogsOneEntryPerRequest(t *testing.T) {
@@ -112,21 +170,16 @@ func TestAccessLog_SeverityMatchesStatusCode(t *testing.T) {
 
 func TestAccessLog_MasksSensitiveRequestFields(t *testing.T) {
 	router, logs := newAccessLogRouterWithPayload(t)
-
 	body := `{"email":"a@b.com","password":"super-secret"}`
 	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	router.ServeHTTP(httptest.NewRecorder(), req)
 
-	all := logs.All()
-	if len(all) != 1 {
-		t.Fatalf("got %d log entries, want 1", len(all))
-	}
-
-	reqPayload, ok := all[0].ContextMap()["request_payload"].(map[string]any)
+	fields := onlyEntryFields(t, logs)
+	reqPayload, ok := fields["request_payload"].(map[string]any)
 	if !ok {
-		t.Fatalf("request_payload = %#v, want a map", all[0].ContextMap()["request_payload"])
+		t.Fatalf("request_payload = %#v, want a map", fields["request_payload"])
 	}
 
 	if reqPayload["password"] != "[MASKED]" {
@@ -140,13 +193,18 @@ func TestAccessLog_MasksSensitiveRequestFields(t *testing.T) {
 
 func TestAccessLog_MasksFieldsNamedLikeCredentials(t *testing.T) {
 	router, logs := newAccessLogRouterWithPayload(t)
-
 	body := `{"password_confirmation":"p1","reset_token":"t1","clientSecretKey":"s1","name":"Jane"}`
 	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+
 	router.ServeHTTP(httptest.NewRecorder(), req)
 
-	reqPayload := logs.All()[0].ContextMap()["request_payload"].(map[string]any)
+	fields := onlyEntryFields(t, logs)
+	reqPayload, ok := fields["request_payload"].(map[string]any)
+	if !ok {
+		t.Fatalf("request_payload = %#v, want a map", fields["request_payload"])
+	}
+
 	for _, field := range []string{"password_confirmation", "reset_token", "clientSecretKey"} {
 		if reqPayload[field] != "[MASKED]" {
 			t.Errorf("%s = %v, want it masked", field, reqPayload[field])
@@ -159,18 +217,27 @@ func TestAccessLog_MasksFieldsNamedLikeCredentials(t *testing.T) {
 }
 
 func TestAccessLog_MasksSensitiveQueryParameters(t *testing.T) {
-	router, logs := newAccessLogRouter(middleware.AccessLogOptions{}, func(c *gin.Context) {
-		c.Status(http.StatusOK)
-	})
-
-	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ping?page=2&reset_token=abc", nil))
-	if got := logs.All()[0].ContextMap()["query"]; got != "page=2&reset_token=%5BMASKED%5D" {
-		t.Errorf("query = %v, want the token value masked", got)
+	tests := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{"query with reset_token", "/ping?page=2&reset_token=abc", "page=2&reset_token=%5BMASKED%5D"},
+		{"query without secrets", "/ping?b=1&a=2", "b=1&a=2"},
 	}
 
-	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ping?b=1&a=2", nil))
-	if got := logs.All()[1].ContextMap()["query"]; got != "b=1&a=2" {
-		t.Errorf("query = %v, want it unchanged when nothing is sensitive", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router, logs := newAccessLogRouter(middleware.AccessLogOptions{}, func(c *gin.Context) {
+				c.Status(http.StatusOK)
+			})
+
+			router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, tt.target, nil))
+
+			if got := onlyEntryFields(t, logs)["query"]; got != tt.want {
+				t.Errorf("query = %v, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -190,30 +257,27 @@ func TestAccessLog_BodiesOnErrorOnly(t *testing.T) {
 		router.ServeHTTP(httptest.NewRecorder(), req)
 	}
 
-	ok, bad := logs.All()[0].ContextMap(), logs.All()[1].ContextMap()
-	if ok["request_payload"] != nil || ok["response_payload"] != "" {
-		t.Errorf("2xx payloads = %v / %v, want both left out", ok["request_payload"], ok["response_payload"])
+	all := logs.All()
+	if len(all) != 2 {
+		t.Fatalf("got %d log entries, want 2", len(all))
 	}
 
-	if bad["request_payload"] == nil || bad["response_payload"] == "" {
-		t.Errorf("4xx payloads = %v / %v, want both logged", bad["request_payload"], bad["response_payload"])
+	ok, bad := all[0].ContextMap(), all[1].ContextMap()
+	if ok["request_payload"] != nil {
+		t.Errorf("2xx request_payload = %v, want it left out", ok["request_payload"])
 	}
-}
 
-// newAccessLogRouterWithPayload wires Payload before AccessLog for payload testing.
-func newAccessLogRouterWithPayload(t *testing.T) (*gin.Engine, *observer.ObservedLogs) {
-	t.Helper()
-	gin.SetMode(gin.TestMode)
-	core, logs := observer.New(zapcore.InfoLevel)
+	if ok["response_payload"] != "" {
+		t.Errorf("2xx response_payload = %v, want it left out", ok["response_payload"])
+	}
 
-	router := gin.New()
-	router.Use(middleware.Payload(middleware.PayloadOptions{MaxBodySize: 1 << 20}, newResponder()))
-	router.Use(middleware.AccessLog(middleware.AccessLogOptions{}, zap.New(core)))
-	router.POST("/login", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"ok": true})
-	})
+	if bad["request_payload"] == nil {
+		t.Error("4xx request_payload = nil, want it logged")
+	}
 
-	return router, logs
+	if bad["response_payload"] == "" {
+		t.Error("4xx response_payload is empty, want it logged")
+	}
 }
 
 func TestAccessLog_ExcludedPathIsNotLogged(t *testing.T) {
@@ -256,7 +320,7 @@ func TestAccessLog_CustomExcludedPathsOverrideDefaults(t *testing.T) {
 
 	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ping", nil))
 	if len(logs.All()) != 1 {
-		t.Fatalf("got %d log entries total, want still 1 — /ping is excluded by the custom list", len(logs.All()))
+		t.Fatalf("got %d log entries total, want still 1 because /ping is excluded by the custom list", len(logs.All()))
 	}
 }
 
@@ -267,9 +331,17 @@ func TestAccessLog_MasksNestedFieldsInTopLevelArray(t *testing.T) {
 
 	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ping", nil))
 
-	got := fmt.Sprint(logs.All()[0].ContextMap()["response_payload"])
-	if strings.Contains(got, "t1") || strings.Contains(got, "k1") || !strings.Contains(got, `"name":"ok"`) {
-		t.Fatalf("response_payload = %s, want accessToken and API-Key masked, name kept", got)
+	got := fmt.Sprint(onlyEntryFields(t, logs)["response_payload"])
+	if strings.Contains(got, "t1") {
+		t.Errorf("response_payload = %s, want accessToken masked", got)
+	}
+
+	if strings.Contains(got, "k1") {
+		t.Errorf("response_payload = %s, want API-Key masked", got)
+	}
+
+	if !strings.Contains(got, `"name":"ok"`) {
+		t.Errorf("response_payload = %s, want name kept", got)
 	}
 }
 
@@ -286,7 +358,7 @@ func TestAccessLog_RespSizeIsUncompressedInsideGzip(t *testing.T) {
 	req.Header.Set("Accept-Encoding", "gzip")
 	router.ServeHTTP(httptest.NewRecorder(), req)
 
-	if got := logs.All()[0].ContextMap()["resp_size"]; got != int64(len(body)) {
+	if got := onlyEntryFields(t, logs)["resp_size"]; got != int64(len(body)) {
 		t.Fatalf("resp_size = %v, want %d (uncompressed)", got, len(body))
 	}
 }

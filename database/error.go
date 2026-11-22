@@ -40,12 +40,7 @@ func RegisterClassifier(c Classifier) {
 	classifiers = append(classifiers, c)
 }
 
-// Classify maps err to an ErrorType and a human-readable detail message, trying every registered
-// engine Classifier in order.
-//
-// detail is for internal logs only, never for clients: it can contain raw database messages
-// (constraint names, SQLSTATE text, RAISE EXCEPTION messages, err.Error()) that leak schema and
-// data. Map the ErrorType to a client-facing error instead.
+// Classify maps a raw database error to a standard ErrorType and readable detail.
 //
 // Usage:
 //
@@ -131,14 +126,14 @@ func MatchNotFound(err, notFound error) error {
 	return Match(err, map[ErrorType]error{ErrorNotFound: notFound})
 }
 
-// Wrapper returns a func that prefixes err with "<prefix>: <op>: " and keeps it unwrappable;
+// ErrorPrefixer returns a func that prefixes err with "<prefix>: <op>: " and keeps it unwrappable;
 // nil stays nil.
 //
 // Usage:
 //
-//	var wrap = database.Wrapper("user repository")
-//	return nil, wrap("get user", database.MatchNotFound(err, domain.ErrUserNotFound))
-func Wrapper(prefix string) func(op string, err error) error {
+//	var prefixErr = database.ErrorPrefixer("user repository")
+//	return nil, prefixErr("get user", database.MatchNotFound(err, domain.ErrUserNotFound))
+func ErrorPrefixer(prefix string) func(op string, err error) error {
 	return func(op string, err error) error {
 		if err == nil {
 			return nil

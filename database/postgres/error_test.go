@@ -1,5 +1,46 @@
 package postgres_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: error_test.go
+// Purpose: Verify that the postgres classifier maps pgx/PgError values to database.ErrorType,
+//          and that database's predicates and Match work on those errors.
+// Type: Unit
+//
+// Test functions: 4
+// Total scenarios: 25
+//
+// #   Test Case                                    Scenario                                    Expected Result
+// 1   TestClassify_MapsPgErrors                    nil error                                   ErrorNone
+// 2   TestClassify_MapsPgErrors                    pgx.ErrNoRows                               ErrorNotFound, "resource not found"
+// 3   TestClassify_MapsPgErrors                    Wrapped pgx.ErrNoRows                       ErrorNotFound, "resource not found"
+// 4   TestClassify_MapsPgErrors                    SQLSTATE 23505 unique_violation             ErrorUniqueViolation
+// 5   TestClassify_MapsPgErrors                    SQLSTATE 23503 foreign_key_violation        ErrorForeignKey
+// 6   TestClassify_MapsPgErrors                    SQLSTATE 23514 check_violation              ErrorCheckViolation
+// 7   TestClassify_MapsPgErrors                    SQLSTATE 42501 insufficient_privilege       ErrorPermissionDenied, "permission denied"
+// 8   TestClassify_MapsPgErrors                    SQLSTATE 08006 connection_failure           ErrorConnection, "database connection error"
+// 9   TestClassify_MapsPgErrors                    SQLSTATE 22P02 invalid_text_representation  ErrorInvalidInput, "invalid input format"
+// 10  TestClassify_MapsPgErrors                    SQLSTATE P0001 raise_exception              ErrorBusiness with the raw message
+// 11  TestClassify_MapsPgErrors                    Unrecognized SQLSTATE                       ErrorUnknown
+// 12  TestClassify_MapsPgErrors                    context.DeadlineExceeded                    ErrorConnection, "query timeout or canceled"
+// 13  TestClassify_MapsPgErrors                    context.Canceled                            ErrorConnection, "query timeout or canceled"
+// 14  TestClassify_MapsPgErrors                    Ordinary error                              ErrorUnknown, the error message as detail
+// 15  TestClassify_IncludesConstraintNameInDetail  Unique violation on constraint uq_test      Detail mentions uq_test
+// 16  TestPredicates_MatchPgErrors                 nil error                                   No predicate matches
+// 17  TestPredicates_MatchPgErrors                 pgx.ErrNoRows                               Only IsNotFound
+// 18  TestPredicates_MatchPgErrors                 Unique violation                            Only IsUniqueViolation
+// 19  TestPredicates_MatchPgErrors                 Foreign key violation                       Only IsForeignKeyViolation
+// 20  TestPredicates_MatchPgErrors                 Check violation                             Only IsCheckViolation
+// 21  TestPredicates_MatchPgErrors                 Connection failure                          Only IsConnectionError
+// 22  TestPredicates_MatchPgErrors                 Unrelated error                             No predicate matches
+// 23  TestMatch_TranslatesPgErrors                 nil error                                   Returns nil
+// 24  TestMatch_TranslatesPgErrors                 Mapped unique violation                     Returns the mapped error
+// 25  TestMatch_TranslatesPgErrors                 Unmapped foreign key violation              Returns the original error unchanged
+//
+// =============================================================================
+
 import (
 	"context"
 	"errors"
@@ -20,9 +61,10 @@ func pgError(code string) *pgconn.PgError {
 
 func TestClassify_MapsPgErrors(t *testing.T) {
 	tests := []struct {
-		name       string
-		err        error
-		wantType   database.ErrorType
+		name     string
+		err      error
+		wantType database.ErrorType
+		// wantDetail "" means the detail is not checked.
 		wantDetail string
 	}{
 		{

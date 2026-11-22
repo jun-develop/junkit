@@ -1,5 +1,39 @@
 package storage_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: local_test.go
+// Purpose: Verify the local-disk storage service: directory creation, uploads and safe deletes.
+// Type: Unit (uses a temporary directory)
+//
+// Test functions: 7
+// Total scenarios: 19
+//
+// #   Test Case                                            Scenario                                  Expected Result
+// 1   TestNewLocalService_CreatesBaseDir                   Base directory does not exist             Directory is created
+// 2   TestNewLocalService_FailsWhenBaseDirCannotBeCreated  Parent of the base dir is a regular file  Returns an error and a nil service
+// 3   TestLocalService_UploadFile_ValidatesExtension       .png file                                 Stored under the base URL with .png
+// 4   TestLocalService_UploadFile_ValidatesExtension       .JPG file                                 Stored with the extension lowercased
+// 5   TestLocalService_UploadFile_ValidatesExtension       .html file                                Returns ErrUnsafeExtension
+// 6   TestLocalService_UploadFile_ValidatesExtension       .SVG file                                 Returns ErrUnsafeExtension
+// 7   TestLocalService_UploadFile_ValidatesExtension       .mjs file                                 Returns ErrUnsafeExtension
+// 8   TestLocalService_UploadFile_ValidatesExtension       No extension                              Returns ErrUnsafeExtension
+// 9   TestLocalService_UploadFile_GeneratesUniqueNames     Same filename uploaded twice              Two different URLs
+// 10  TestLocalService_UploadFile_StopsWhenCancelled       Cancelled context                         Returns context.Canceled; no file left behind
+// 11  TestLocalService_DeleteFile_DeletesOnlySafeURLs      URL of an uploaded file                   File is deleted
+// 12  TestLocalService_DeleteFile_DeletesOnlySafeURLs      URL of a missing file                     Returns nil
+// 13  TestLocalService_DeleteFile_DeletesOnlySafeURLs      URL on another host                       Returns ErrInvalidURL; file kept
+// 14  TestLocalService_DeleteFile_DeletesOnlySafeURLs      Empty URL                                 Returns ErrInvalidURL; file kept
+// 15  TestLocalService_DeleteFile_DeletesOnlySafeURLs      Bare base URL                             Returns ErrInvalidURL; file kept
+// 16  TestLocalService_DeleteFile_DeletesOnlySafeURLs      Path "/.."                                Returns ErrInvalidURL; file kept
+// 17  TestLocalService_DeleteFile_DeletesOnlySafeURLs      Nested path "/x/.."                       Returns ErrInvalidURL; file kept
+// 18  TestLocalService_DeleteFile_DeletesOnlySafeURLs      Path with a backslash                     Returns ErrInvalidURL; file kept
+// 19  TestLocalService_DeleteFile_ReturnsRemovalError      Path is a non-empty directory             Returns an error other than ErrInvalidURL
+//
+// =============================================================================
+
 import (
 	"context"
 	"errors"
@@ -29,24 +63,46 @@ func newService(t *testing.T) (*storage.LocalService, string) {
 func TestNewLocalService_CreatesBaseDir(t *testing.T) {
 	_, dir := newService(t)
 
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		t.Fatalf("NewLocalService() did not create %s as a directory", dir)
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("os.Stat(%s) error = %v, want the directory created", dir, err)
+	}
+
+	if !info.IsDir() {
+		t.Fatalf("%s is not a directory", dir)
 	}
 }
 
-func TestLocalService_UploadFile(t *testing.T) {
+func TestNewLocalService_FailsWhenBaseDirCannotBeCreated(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatalf("test setup: %v", err)
+	}
+
+	svc, err := storage.NewLocalService(storage.Options{BaseDir: filepath.Join(blocker, "uploads")})
+
+	if err == nil {
+		t.Fatal("NewLocalService() error = nil, want an error when a parent is a regular file")
+	}
+
+	if svc != nil {
+		t.Errorf("NewLocalService() = %v, want nil on error", svc)
+	}
+}
+
+func TestLocalService_UploadFile_ValidatesExtension(t *testing.T) {
 	tests := []struct {
 		name     string
 		filename string
 		wantExt  string
 		wantErr  error
 	}{
-		{name: "keeps the extension", filename: "avatar.png", wantExt: ".png"},
-		{name: "lowercases the extension", filename: "avatar.JPG", wantExt: ".jpg"},
-		{name: "rejects html", filename: "page.html", wantErr: storage.ErrUnsafeExtension},
-		{name: "rejects svg in any case", filename: "logo.SVG", wantErr: storage.ErrUnsafeExtension},
-		{name: "rejects js", filename: "app.mjs", wantErr: storage.ErrUnsafeExtension},
-		{name: "rejects no extension", filename: "avatar", wantErr: storage.ErrUnsafeExtension},
+		{name: "png file keeps its extension", filename: "avatar.png", wantExt: ".png"},
+		{name: "uppercase extension is lowercased", filename: "avatar.JPG", wantExt: ".jpg"},
+		{name: "html file is rejected", filename: "page.html", wantErr: storage.ErrUnsafeExtension},
+		{name: "svg file is rejected in any case", filename: "logo.SVG", wantErr: storage.ErrUnsafeExtension},
+		{name: "javascript module is rejected", filename: "app.mjs", wantErr: storage.ErrUnsafeExtension},
+		{name: "file without extension is rejected", filename: "avatar", wantErr: storage.ErrUnsafeExtension},
 	}
 
 	for _, tt := range tests {
@@ -62,8 +118,12 @@ func TestLocalService_UploadFile(t *testing.T) {
 				return
 			}
 
-			if !strings.HasPrefix(url, baseURL+"/") || strings.HasPrefix(url, baseURL+"//") {
+			if !strings.HasPrefix(url, baseURL+"/") {
 				t.Fatalf("UploadFile() url = %q, want it under %s/", url, baseURL)
+			}
+
+			if strings.HasPrefix(url, baseURL+"//") {
+				t.Fatalf("UploadFile() url = %q, want a single slash after %s", url, baseURL)
 			}
 
 			if filepath.Ext(url) != tt.wantExt {
@@ -71,20 +131,28 @@ func TestLocalService_UploadFile(t *testing.T) {
 			}
 
 			data, err := os.ReadFile(filepath.Join(dir, filepath.Base(url)))
-			if err != nil || string(data) != "bytes" {
-				t.Fatalf("stored file = %q, %v; want %q", data, err, "bytes")
+			if err != nil {
+				t.Fatalf("read stored file error = %v", err)
+			}
+
+			if string(data) != "bytes" {
+				t.Fatalf("stored file = %q, want %q", data, "bytes")
 			}
 		})
 	}
 }
 
-func TestLocalService_UploadFileUniqueNames(t *testing.T) {
+func TestLocalService_UploadFile_GeneratesUniqueNames(t *testing.T) {
 	svc, _ := newService(t)
 
-	url1, err1 := svc.UploadFile(context.Background(), strings.NewReader("a"), "same-name.jpg")
-	url2, err2 := svc.UploadFile(context.Background(), strings.NewReader("b"), "same-name.jpg")
-	if err1 != nil || err2 != nil {
-		t.Fatalf("UploadFile() errors = %v, %v", err1, err2)
+	url1, err := svc.UploadFile(context.Background(), strings.NewReader("a"), "same-name.jpg")
+	if err != nil {
+		t.Fatalf("first UploadFile() error = %v", err)
+	}
+
+	url2, err := svc.UploadFile(context.Background(), strings.NewReader("b"), "same-name.jpg")
+	if err != nil {
+		t.Fatalf("second UploadFile() error = %v", err)
 	}
 
 	if url1 == url2 {
@@ -92,7 +160,7 @@ func TestLocalService_UploadFileUniqueNames(t *testing.T) {
 	}
 }
 
-func TestLocalService_UploadFileCancelled(t *testing.T) {
+func TestLocalService_UploadFile_StopsWhenCancelled(t *testing.T) {
 	svc, dir := newService(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -101,12 +169,17 @@ func TestLocalService_UploadFileCancelled(t *testing.T) {
 		t.Fatalf("UploadFile() error = %v, want context.Canceled", err)
 	}
 
-	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("os.ReadDir(%s) error = %v", dir, err)
+	}
+
+	if len(entries) != 0 {
 		t.Fatalf("cancelled upload left %d files behind", len(entries))
 	}
 }
 
-func TestLocalService_DeleteFile(t *testing.T) {
+func TestLocalService_DeleteFile_DeletesOnlySafeURLs(t *testing.T) {
 	tests := []struct {
 		name    string
 		url     func(uploaded string) string
@@ -115,13 +188,13 @@ func TestLocalService_DeleteFile(t *testing.T) {
 	}{
 		{name: "deletes an uploaded file", url: func(u string) string { return u }, gone: true},
 		{name: "missing file is not an error", url: func(string) string { return baseURL + "/missing.png" }},
-		{name: "other host is rejected", wantErr: storage.ErrInvalidURL,
+		{name: "url on another host is rejected", wantErr: storage.ErrInvalidURL,
 			url: func(u string) string { return "http://evil.example/uploads/" + filepath.Base(u) }},
-		{name: "empty", url: func(string) string { return "" }, wantErr: storage.ErrInvalidURL},
-		{name: "bare base URL", url: func(string) string { return baseURL + "/" }, wantErr: storage.ErrInvalidURL},
-		{name: "dot dot", url: func(string) string { return baseURL + "/.." }, wantErr: storage.ErrInvalidURL},
-		{name: "nested path", url: func(string) string { return baseURL + "/x/.." }, wantErr: storage.ErrInvalidURL},
-		{name: "backslash", url: func(string) string { return baseURL + `/..\x` }, wantErr: storage.ErrInvalidURL},
+		{name: "empty url is rejected", url: func(string) string { return "" }, wantErr: storage.ErrInvalidURL},
+		{name: "bare base url is rejected", url: func(string) string { return baseURL + "/" }, wantErr: storage.ErrInvalidURL},
+		{name: "parent directory path is rejected", url: func(string) string { return baseURL + "/.." }, wantErr: storage.ErrInvalidURL},
+		{name: "nested path is rejected", url: func(string) string { return baseURL + "/x/.." }, wantErr: storage.ErrInvalidURL},
+		{name: "path with a backslash is rejected", url: func(string) string { return baseURL + `/..\x` }, wantErr: storage.ErrInvalidURL},
 	}
 
 	for _, tt := range tests {
@@ -138,13 +211,13 @@ func TestLocalService_DeleteFile(t *testing.T) {
 
 			_, statErr := os.Stat(filepath.Join(dir, filepath.Base(uploaded)))
 			if gone := os.IsNotExist(statErr); gone != tt.gone {
-				t.Fatalf("file gone = %v, want %v", gone, tt.gone)
+				t.Fatalf("uploaded file deleted = %v, want %v", gone, tt.gone)
 			}
 		})
 	}
 }
 
-func TestLocalService_DeleteFileRemovalError(t *testing.T) {
+func TestLocalService_DeleteFile_ReturnsRemovalError(t *testing.T) {
 	svc, dir := newService(t)
 
 	// os.Remove fails on a non-empty directory with an error other than "not exist".
@@ -154,7 +227,11 @@ func TestLocalService_DeleteFileRemovalError(t *testing.T) {
 	}
 
 	err := svc.DeleteFile(context.Background(), baseURL+"/not-a-plain-file")
-	if err == nil || errors.Is(err, storage.ErrInvalidURL) {
-		t.Fatalf("DeleteFile() error = %v, want a removal error", err)
+	if err == nil {
+		t.Fatal("DeleteFile() error = nil, want a removal error")
+	}
+
+	if errors.Is(err, storage.ErrInvalidURL) {
+		t.Fatalf("DeleteFile() error = %v, want a removal error, not ErrInvalidURL", err)
 	}
 }

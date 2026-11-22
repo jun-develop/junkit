@@ -1,5 +1,21 @@
 package middleware_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: identity_test.go
+// Purpose: Verify that SetIdentity stores the caller identity where handlers can read it.
+// Type: Unit
+//
+// Test functions: 1
+// Total scenarios: 1
+//
+// #  Test Case                                                        Scenario                                                Expected Result
+// 1  TestSetIdentity_ReadableFromRequestContextAndFallbackGinContext  Identity set on a gin.Context with ContextWithFallback  Readable from the request context and from the gin.Context
+//
+// =============================================================================
+
 import (
 	"net/http/httptest"
 	"testing"
@@ -21,11 +37,21 @@ func TestSetIdentity_ReadableFromRequestContextAndFallbackGinContext(t *testing.
 
 	middleware.SetIdentity(c, want)
 
-	if got, ok := security.GetIdentity[*testIdentity](c.Request.Context()); !ok || got != want {
-		t.Errorf("from request context: got %v, %v", got, ok)
+	got, ok := security.GetIdentity[*testIdentity](c.Request.Context())
+	if !ok {
+		t.Error("GetIdentity(request context) ok = false, want true")
 	}
 
-	if got, ok := security.GetIdentity[*testIdentity](c); !ok || got != want {
-		t.Errorf("from gin.Context with ContextWithFallback: got %v, %v", got, ok)
+	if got != want {
+		t.Errorf("GetIdentity(request context) = %v, want %v", got, want)
+	}
+
+	got, ok = security.GetIdentity[*testIdentity](c)
+	if !ok {
+		t.Error("GetIdentity(gin.Context with ContextWithFallback) ok = false, want true")
+	}
+
+	if got != want {
+		t.Errorf("GetIdentity(gin.Context with ContextWithFallback) = %v, want %v", got, want)
 	}
 }

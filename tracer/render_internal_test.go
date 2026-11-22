@@ -1,5 +1,22 @@
 package tracer
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: render_internal_test.go
+// Purpose: Verify the internal DB summary and how the HTML dashboard shows a failed query.
+// Type: Unit
+//
+// Test functions: 2
+// Total scenarios: 2
+//
+// #  Test Case                             Scenario                                               Expected Result
+// 1  TestSummarizeDB_GroupsBySQLNotName    Two distinct "Select" queries and one query run twice  Only the query run twice is repeated; 4 queries, 1 failed
+// 2  TestRenderHTML_HighlightsFailedQuery  One failed INSERT                                      Error block with message and origin; no location in JSON, no {} body, no JavaScript
+//
+// =============================================================================
+
 import (
 	"strings"
 	"testing"
@@ -15,7 +32,6 @@ func sqlEntry(name, query, bound, errMsg string) LogEntry {
 	return LogEntry{Type: TypeSQL, Label: name, DurationMS: 1, Data: data}
 }
 
-// TestSummarizeDB_GroupsBySQLNotName checks repeated queries are grouped by SQL rather than label.
 func TestSummarizeDB_GroupsBySQLNotName(t *testing.T) {
 	entries := []LogEntry{
 		// Two different unannotated queries share the guessed name "Select".
@@ -32,16 +48,28 @@ func TestSummarizeDB_GroupsBySQLNotName(t *testing.T) {
 		t.Fatalf("Repeated = %+v, want only GetItem (distinct Select queries are not a repeat)", s.Repeated)
 	}
 
-	if r := s.Repeated[0]; r.Name != "GetItem" || r.Count != 2 || r.SQL != "SELECT * FROM items WHERE id = $1" {
-		t.Fatalf("Repeated[0] = %+v, want GetItem x2 with its unbound SQL", r)
+	r := s.Repeated[0]
+	if r.Name != "GetItem" {
+		t.Errorf("Repeated[0].Name = %q, want %q", r.Name, "GetItem")
 	}
 
-	if s.Queries != 4 || s.Failed != 1 {
-		t.Fatalf("Queries, Failed = %d, %d, want 4, 1", s.Queries, s.Failed)
+	if r.Count != 2 {
+		t.Errorf("Repeated[0].Count = %d, want 2", r.Count)
+	}
+
+	if r.SQL != "SELECT * FROM items WHERE id = $1" {
+		t.Errorf("Repeated[0].SQL = %q, want the unbound SQL", r.SQL)
+	}
+
+	if s.Queries != 4 {
+		t.Errorf("Queries = %d, want 4", s.Queries)
+	}
+
+	if s.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", s.Failed)
 	}
 }
 
-// TestRenderHTML_HighlightsFailedQuery checks the failed-query error block.
 func TestRenderHTML_HighlightsFailedQuery(t *testing.T) {
 	d := New()
 	d.Append(sqlEntry("CreateUser", "INSERT INTO users VALUES ($1)", "INSERT INTO users VALUES ('jane')", "duplicate key"))
@@ -50,11 +78,11 @@ func TestRenderHTML_HighlightsFailedQuery(t *testing.T) {
 	page := RenderHTML(ctx)
 
 	if strings.Contains(page, `"location"`) {
-		t.Error("location belongs in the error block, not repeated in the JSON body")
+		t.Error("page has \"location\" in the JSON body, want it only in the error block")
 	}
 
 	if strings.Contains(page, "<pre>{}</pre>") {
-		t.Error("a failed query with nothing else to show should not render an empty {} body")
+		t.Error("page renders an empty {} body, want none for a failed query with nothing else to show")
 	}
 
 	for _, want := range []string{`class="card sql failed"`, `class="sql-error">✘ duplicate key`, `<b>1</b><span class="muted">FAILED`,
@@ -65,6 +93,6 @@ func TestRenderHTML_HighlightsFailedQuery(t *testing.T) {
 	}
 
 	if strings.Contains(page, "<script") {
-		t.Error("dashboard should not ship JavaScript (Postman's preview doesn't run it)")
+		t.Error("dashboard contains <script, want no JavaScript (Postman's preview does not run it)")
 	}
 }

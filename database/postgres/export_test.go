@@ -1,5 +1,16 @@
 package postgres
 
+// =============================================================================
+// TEST HELPERS (no test scenarios)
+// =============================================================================
+//
+// File: export_test.go
+// Purpose: Re-export unexported constructors so the black-box tests (package postgres_test) can
+//          build a query tracer, a DB around a fake pool, and a pool config without a database.
+// Used by: query_tracer_test.go, tracer_test.go, options_test.go
+//
+// =============================================================================
+
 import (
 	"time"
 

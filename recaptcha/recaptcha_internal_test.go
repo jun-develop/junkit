@@ -1,5 +1,34 @@
 package recaptcha
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: recaptcha_internal_test.go
+// Purpose: Verify Client.Verify against a fake siteverify server, the request it sends, and client defaults.
+// Type: Unit
+//
+// Test functions: 5
+// Total scenarios: 14
+//
+// #   Test Case                                        Scenario                            Expected Result
+// 1   TestClient_Verify_MapsResponseToError            Success with a high score           Returns nil
+// 2   TestClient_Verify_MapsResponseToError            success=false from Google           Returns ErrVerificationFailed
+// 3   TestClient_Verify_MapsResponseToError            Score below MinScore                Returns ErrLowScore
+// 4   TestClient_Verify_MapsResponseToError            Non-200 status                      Returns ErrUnavailable
+// 5   TestClient_Verify_MapsResponseToError            Invalid JSON body                   Returns ErrUnavailable
+// 6   TestClient_Verify_MapsResponseToError            Action matches ExpectedAction       Returns nil
+// 7   TestClient_Verify_MapsResponseToError            Action differs from ExpectedAction  Returns ErrVerificationFailed
+// 8   TestClient_Verify_MapsResponseToError            Hostname in the allowed list        Returns nil
+// 9   TestClient_Verify_MapsResponseToError            Hostname not in the allowed list    Returns ErrVerificationFailed
+// 10  TestClient_Verify_SendsFormBody                  Verify with token and remote IP     POST form body with secret, response and remoteip; empty query
+// 11  TestClient_Verify_TransportErrorHidesURL         Server unreachable, secret in URL   Returns ErrUnavailable without the URL or secret
+// 12  TestNewClient_AppliesDefaults                    MinScore 0, nil HTTP client         MinScore 0.5, 10s-timeout client, Google endpoint
+// 13  TestNewClient_AppliesDefaults                    Negative MinScore, nil HTTP client  MinScore 0.5, 10s-timeout client, Google endpoint
+// 14  TestClient_Verify_MissingSecretKeyIsUnavailable  No secret key configured            Returns ErrUnavailable
+//
+// =============================================================================
+
 import (
 	"context"
 	"errors"
@@ -30,30 +59,31 @@ func reply(body string) http.HandlerFunc {
 	}
 }
 
-func TestClient_Verify(t *testing.T) {
+func TestClient_Verify_MapsResponseToError(t *testing.T) {
 	tests := []struct {
 		name    string
 		opts    Options
 		handler http.HandlerFunc
 		wantErr error
 	}{
-		{"success", Options{}, reply(`{"success": true, "score": 0.9}`), nil},
-		{"rejected", Options{}, reply(`{"success": false, "error-codes": ["invalid-input-response"]}`),
+		{"success with a high score", Options{}, reply(`{"success": true, "score": 0.9}`), nil},
+		{"google rejects the token", Options{}, reply(`{"success": false, "error-codes": ["invalid-input-response"]}`),
 			ErrVerificationFailed},
-		{"low score", Options{}, reply(`{"success": true, "score": 0.1}`), ErrLowScore},
-		{"non-200", Options{}, func(w http.ResponseWriter, _ *http.Request) {
+		{"score below min score", Options{}, reply(`{"success": true, "score": 0.1}`), ErrLowScore},
+		{"non-200 status", Options{}, func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 		}, ErrUnavailable},
-		{"bad json", Options{}, reply(`{`), ErrUnavailable},
-		{"action match", Options{ExpectedAction: "login"},
+		{"invalid json body", Options{}, reply(`{`), ErrUnavailable},
+		{"action matches expected action", Options{ExpectedAction: "login"},
 			reply(`{"success": true, "score": 0.9, "action": "login"}`), nil},
-		{"action mismatch", Options{ExpectedAction: "login"},
+		{"action differs from expected action", Options{ExpectedAction: "login"},
 			reply(`{"success": true, "score": 0.9, "action": "signup"}`), ErrVerificationFailed},
-		{"hostname match", Options{Hostnames: []string{"a.example", "b.example"}},
+		{"hostname in the allowed list", Options{Hostnames: []string{"a.example", "b.example"}},
 			reply(`{"success": true, "score": 0.9, "hostname": "b.example"}`), nil},
-		{"hostname mismatch", Options{Hostnames: []string{"a.example"}},
+		{"hostname not in the allowed list", Options{Hostnames: []string{"a.example"}},
 			reply(`{"success": true, "score": 0.9, "hostname": "evil.example"}`), ErrVerificationFailed},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := newTestClient(t, tt.opts, tt.handler)
@@ -86,11 +116,19 @@ func TestClient_Verify_SendsFormBody(t *testing.T) {
 	}
 
 	if gotType != "application/x-www-form-urlencoded" {
-		t.Errorf("Content-Type = %q", gotType)
+		t.Errorf("Content-Type = %q, want application/x-www-form-urlencoded", gotType)
 	}
 
-	if gotSecret != "test-secret" || gotResponse != "tok" || gotRemoteIP != "203.0.113.5" {
-		t.Errorf("form = %q/%q/%q", gotSecret, gotResponse, gotRemoteIP)
+	if gotSecret != "test-secret" {
+		t.Errorf("form secret = %q, want %q", gotSecret, "test-secret")
+	}
+
+	if gotResponse != "tok" {
+		t.Errorf("form response = %q, want %q", gotResponse, "tok")
+	}
+
+	if gotRemoteIP != "203.0.113.5" {
+		t.Errorf("form remoteip = %q, want %q", gotRemoteIP, "203.0.113.5")
 	}
 }
 
@@ -103,19 +141,24 @@ func TestClient_Verify_TransportErrorHidesURL(t *testing.T) {
 		t.Fatalf("Verify() error = %v, want ErrUnavailable", err)
 	}
 
-	if strings.Contains(err.Error(), "s3cr3t") || strings.Contains(err.Error(), "siteverify") {
-		t.Fatalf("error %q leaks the request URL", err)
+	if strings.Contains(err.Error(), "s3cr3t") {
+		t.Errorf("Verify() error = %q, want it without the secret", err)
+	}
+
+	if strings.Contains(err.Error(), "siteverify") {
+		t.Errorf("Verify() error = %q, want it without the request URL", err)
 	}
 }
 
-func TestNewClient_Defaults(t *testing.T) {
+func TestNewClient_AppliesDefaults(t *testing.T) {
 	tests := []struct {
 		name     string
 		minScore float64
 	}{
-		{"zero", 0},
-		{"negative", -1},
+		{"zero min score", 0},
+		{"negative min score", -1},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := NewClient(Options{SecretKey: "x", MinScore: tt.minScore}, nil)
@@ -124,8 +167,12 @@ func TestNewClient_Defaults(t *testing.T) {
 				t.Errorf("MinScore = %v, want 0.5", c.opts.MinScore)
 			}
 
-			if c.httpClient == nil || c.httpClient.Timeout != 10*time.Second {
-				t.Error("nil httpClient should default to a client with a 10s timeout")
+			if c.httpClient == nil {
+				t.Fatal("httpClient = nil, want a default client")
+			}
+
+			if c.httpClient.Timeout != 10*time.Second {
+				t.Errorf("httpClient.Timeout = %v, want 10s", c.httpClient.Timeout)
 			}
 
 			if c.apiURL != siteVerifyURL {
@@ -135,7 +182,7 @@ func TestNewClient_Defaults(t *testing.T) {
 	}
 }
 
-func TestClient_Verify_MissingSecretKey(t *testing.T) {
+func TestClient_Verify_MissingSecretKeyIsUnavailable(t *testing.T) {
 	c := NewClient(Options{}, nil)
 
 	if err := c.Verify(context.Background(), "token", ""); !errors.Is(err, ErrUnavailable) {

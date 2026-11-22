@@ -1,5 +1,22 @@
 package postgres_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: tracer_test.go
+// Purpose: Verify the tracer contract: every query run through DB.Executor reaches the
+//          tracer.Debugger, inside and outside a transaction.
+// Type: Unit (fake pool and transaction; queryTx embeds fakeTx from tx_test.go)
+//
+// Test functions: 1
+// Total scenarios: 1
+//
+// #  Test Case                      Scenario                                                Expected Result
+// 1  TestExecutor_TracesEveryQuery  Exec, Query, QueryRow outside and inside a transaction  All 6 queries traced in order with bound SQL; transaction committed
+//
+// =============================================================================
+
 import (
 	"context"
 	"errors"
@@ -80,12 +97,12 @@ func TestExecutor_TracesEveryQuery(t *testing.T) {
 
 	run := func(ctx context.Context) {
 		if _, err := db.Executor(ctx).Exec(ctx, "UPDATE users SET seen = $1", true); err != nil {
-			t.Fatal(err)
+			t.Fatalf("Exec() error = %v", err)
 		}
 
 		rows, err := db.Executor(ctx).Query(ctx, "SELECT id FROM users")
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("Query() error = %v", err)
 		}
 		rows.Close()
 
@@ -101,11 +118,11 @@ func TestExecutor_TracesEveryQuery(t *testing.T) {
 		run(txCtx)
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		t.Fatalf("WithTransaction() error = %v", err)
 	}
 
 	if !tx.committed {
-		t.Fatal("expected the transaction to be committed")
+		t.Fatal("transaction committed = false, want true")
 	}
 
 	want := []string{

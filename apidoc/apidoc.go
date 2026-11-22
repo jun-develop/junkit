@@ -1,6 +1,4 @@
-// Package apidoc builds an OpenAPI 3.0 document from the request and response structs an app
-// already has: field names come from their json/form tags, rules from binding tags, samples from
-// example tags. Register serves it with Scalar.
+// Package apidoc generates OpenAPI 3.0 specs from Go structs and tags, served via Scalar.
 package apidoc
 
 import (
@@ -14,13 +12,18 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Route documents one endpoint. Method and Path are relative to the group a feature registers its
-// routes on, exactly as passed to group.GET/POST/...
+// Route documents an API endpoint; Method and Path match router definitions (e.g. group.POST).
 //
 // Usage:
 //
-//	apidoc.Route{Method: http.MethodPost, Path: "/users", Summary: "Create a user",
-//	    Body: CreateUserRequest{}, Status: http.StatusCreated, Response: UserResponse{}}
+//	apidoc.Route{
+//	    Method:   http.MethodPost,
+//	    Path:     "/users",
+//	    Summary:  "Create a user",
+//	    Body:     CreateUserRequest{},
+//	    Status:   http.StatusCreated,
+//	    Response: UserResponse{},
+//	}
 type Route struct {
 	Method      string
 	Path        string
@@ -280,8 +283,7 @@ func ref(name string) map[string]string {
 // ginParam matches a gin path parameter (:name or *name).
 var ginParam = regexp.MustCompile(`[:*]([A-Za-z0-9_]+)`)
 
-// openAPIPath turns /users/:uuid into /users/{uuid} and returns its path parameters. A parameter
-// named uuid or id is typed as junkit's RoutePatterns enforce it.
+// openAPIPath converts Gin path format (/users/:id) to OpenAPI format (/users/{id}) and extracts parameters.
 func openAPIPath(path string) (string, []map[string]any) {
 	var params []map[string]any
 	for _, m := range ginParam.FindAllStringSubmatch(path, -1) {

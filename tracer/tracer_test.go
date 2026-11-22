@@ -1,5 +1,31 @@
 package tracer_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: tracer_test.go
+// Purpose: Verify the request Debugger, its context lookup, and the Comment/Var/Warn/Error/Stop helpers.
+// Type: Unit
+//
+// Test functions: 9
+// Total scenarios: 11
+//
+// #   Test Case                                     Scenario                                             Expected Result
+// 1   TestDebugger_NilReceiverIsSafe                Append and Logs on a nil Debugger                    No panic; Logs returns nil
+// 2   TestDebugger_AppendKeepsOrder                 Two entries appended                                 Logs returns them in append order
+// 3   TestDebugger_LogsReturnsASnapshot             Caller mutates the returned slice                    Internal entries unchanged
+// 4   TestFromContext_ReturnsAttachedDebugger       Plain context                                        FromContext returns nil; Enabled is false
+// 5   TestFromContext_ReturnsAttachedDebugger       Context with a Debugger                              FromContext returns it; Enabled is true
+// 6   TestFromContext_GinContextUsesRequestContext  gin.Context whose request carries a Debugger         Returns that Debugger
+// 7   TestFromContext_GinContextUsesRequestContext  gin.Context without a request                        Returns nil
+// 8   TestLogHelpers_NoOpWithoutDebugger            Every helper called on a plain context               No panic
+// 9   TestCommentAndVar_RecordEntries               One comment, Var with two values, Var with an error  4 entries: the comment, one per value, the error message
+// 10  TestWarnAndError_RecordIssues                 Warn with an empty label, then Error                 Warn uses "WARNING" and has no stack; Error has a stack
+// 11  TestStop_PanicsWithBreakpointAfterRecording   Stop with a Debugger attached                        Records the value, then panics with BreakpointSignal
+//
+// =============================================================================
+
 import (
 	"context"
 	"errors"
@@ -11,35 +37,38 @@ import (
 	"github.com/jun-develop/junkit/tracer"
 )
 
-// newCtx returns a context carrying a fresh Debugger.
+// newCtx returns a context carrying a fresh Debugger. Shared by every tracer_test file.
 func newCtx() (context.Context, *tracer.Debugger) {
 	d := tracer.New()
 	return tracer.WithContext(context.Background(), d), d
 }
 
-// TestDebugger_NilReceiverIsSafe checks a nil Debugger ignores Append and returns no logs.
 func TestDebugger_NilReceiverIsSafe(t *testing.T) {
 	var d *tracer.Debugger
-	// Must not panic.
+
 	d.Append(tracer.LogEntry{Type: tracer.TypeComment})
+
 	if logs := d.Logs(); logs != nil {
 		t.Fatalf("Logs() on nil Debugger = %v, want nil", logs)
 	}
 }
 
-// TestDebugger_AppendKeepsOrder checks entries are returned in append order.
 func TestDebugger_AppendKeepsOrder(t *testing.T) {
 	d := tracer.New()
 	d.Append(tracer.LogEntry{Type: tracer.TypeComment, Label: "first"})
 	d.Append(tracer.LogEntry{Type: tracer.TypeWarning, Label: "second"})
 
 	logs := d.Logs()
-	if len(logs) != 2 || logs[0].Label != "first" || logs[1].Label != "second" {
-		t.Fatalf("Logs() = %+v, want [first second] in append order", logs)
+
+	if len(logs) != 2 {
+		t.Fatalf("Logs() = %+v, want 2 entries", logs)
+	}
+
+	if logs[0].Label != "first" || logs[1].Label != "second" {
+		t.Errorf("Logs() labels = [%s %s], want [first second]", logs[0].Label, logs[1].Label)
 	}
 }
 
-// TestDebugger_LogsReturnsASnapshot checks Logs returns a copy unaffected by later appends.
 func TestDebugger_LogsReturnsASnapshot(t *testing.T) {
 	d := tracer.New()
 	d.Append(tracer.LogEntry{Type: tracer.TypeComment, Label: "original"})
@@ -48,53 +77,60 @@ func TestDebugger_LogsReturnsASnapshot(t *testing.T) {
 	logs[0].Label = "mutated by caller"
 
 	if got := d.Logs()[0].Label; got != "original" {
-		t.Fatalf("Logs() leaked internal state: got %q after an external mutation, want %q", got, "original")
+		t.Fatalf("Logs()[0].Label after an external mutation = %q, want %q", got, "original")
 	}
 }
 
-// TestFromContext checks FromContext and Enabled with and without an attached Debugger.
-func TestFromContext(t *testing.T) {
-	if got := tracer.FromContext(context.Background()); got != nil {
-		t.Fatalf("FromContext() on a plain context = %v, want nil", got)
-	}
+func TestFromContext_ReturnsAttachedDebugger(t *testing.T) {
+	t.Run("plain context", func(t *testing.T) {
+		if got := tracer.FromContext(context.Background()); got != nil {
+			t.Errorf("FromContext() = %v, want nil", got)
+		}
 
-	if tracer.Enabled(context.Background()) {
-		t.Fatal("Enabled() on a plain context should be false")
-	}
+		if tracer.Enabled(context.Background()) {
+			t.Error("Enabled() = true, want false")
+		}
+	})
 
-	ctx, d := newCtx()
-	if got := tracer.FromContext(ctx); got != d {
-		t.Fatal("FromContext() did not return the Debugger passed to WithContext()")
-	}
+	t.Run("context with a debugger", func(t *testing.T) {
+		ctx, d := newCtx()
 
-	if !tracer.Enabled(ctx) {
-		t.Fatal("Enabled() should be true once a Debugger is attached")
-	}
+		if got := tracer.FromContext(ctx); got != d {
+			t.Errorf("FromContext() = %p, want the Debugger passed to WithContext (%p)", got, d)
+		}
+
+		if !tracer.Enabled(ctx) {
+			t.Error("Enabled() = false, want true")
+		}
+	})
 }
 
-// TestFromContext_GinContextUsesRequestContext checks gin.Context lookup.
 func TestFromContext_GinContextUsesRequestContext(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	d := tracer.New()
-	req := httptest.NewRequest("GET", "/", nil)
-	req = req.WithContext(tracer.WithContext(req.Context(), d))
 
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = req
+	t.Run("gin context whose request carries a debugger", func(t *testing.T) {
+		d := tracer.New()
+		req := httptest.NewRequest("GET", "/", nil)
+		req = req.WithContext(tracer.WithContext(req.Context(), d))
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = req
 
-	if got := tracer.FromContext(c); got != d {
-		t.Fatal("FromContext(*gin.Context) did not find the Debugger on the request context")
-	}
+		if got := tracer.FromContext(c); got != d {
+			t.Errorf("FromContext(*gin.Context) = %p, want the request's Debugger %p", got, d)
+		}
+	})
 
-	if got := tracer.FromContext(&gin.Context{}); got != nil {
-		t.Fatalf("FromContext on a gin.Context without a request = %v, want nil", got)
-	}
+	t.Run("gin context without a request", func(t *testing.T) {
+		if got := tracer.FromContext(&gin.Context{}); got != nil {
+			t.Errorf("FromContext(*gin.Context) = %v, want nil", got)
+		}
+	})
 }
 
-// TestLogHelpers_NoOpWithoutDebugger checks every log helper is a no-op without a Debugger.
 func TestLogHelpers_NoOpWithoutDebugger(t *testing.T) {
 	ctx := context.Background()
-	// None of these may panic or record anywhere.
+
+	// Passes if none of these panics.
 	tracer.Comment(ctx, "note")
 	tracer.Var(ctx, "value", 1)
 	tracer.Warn(ctx, "warn", "boom")
@@ -102,8 +138,7 @@ func TestLogHelpers_NoOpWithoutDebugger(t *testing.T) {
 	tracer.Stop(ctx, "stop", 1)
 }
 
-// TestComment_Var checks Comment records a note and Var one entry per value.
-func TestComment_Var(t *testing.T) {
+func TestCommentAndVar_RecordEntries(t *testing.T) {
 	ctx, d := newCtx()
 
 	tracer.Comment(ctx, "starting")
@@ -116,20 +151,23 @@ func TestComment_Var(t *testing.T) {
 	}
 
 	if logs[0].Type != tracer.TypeComment || logs[0].Label != "starting" {
-		t.Errorf("logs[0] = %+v, want the comment", logs[0])
+		t.Errorf("logs[0] = %+v, want the comment %q", logs[0], "starting")
 	}
 
-	if logs[1].Data != 1 || logs[2].Data != "two" {
-		t.Errorf("Var recorded %v, %v, want one entry per value", logs[1].Data, logs[2].Data)
+	if logs[1].Data != 1 {
+		t.Errorf("logs[1].Data = %v, want 1 (one entry per value)", logs[1].Data)
+	}
+
+	if logs[2].Data != "two" {
+		t.Errorf("logs[2].Data = %v, want %q (one entry per value)", logs[2].Data, "two")
 	}
 
 	if logs[3].Data != "boom" {
-		t.Errorf("Var(error) recorded %#v, want the error message", logs[3].Data)
+		t.Errorf("Var(error) recorded %#v, want the error message %q", logs[3].Data, "boom")
 	}
 }
 
-// TestWarn_Error checks Warn and Error record issues, only Error with a stack.
-func TestWarn_Error(t *testing.T) {
+func TestWarnAndError_RecordIssues(t *testing.T) {
 	ctx, d := newCtx()
 
 	tracer.Warn(ctx, "", "soft")
@@ -141,27 +179,47 @@ func TestWarn_Error(t *testing.T) {
 	}
 
 	warn := logs[0].Data.(tracer.IssueData)
-	if logs[0].Label != "WARNING" || warn.Error != "soft" || warn.Stack != "" {
-		t.Errorf("warning = %q %+v, want default label, message and no stack", logs[0].Label, warn)
+	if logs[0].Label != "WARNING" {
+		t.Errorf("warning label = %q, want the default %q", logs[0].Label, "WARNING")
 	}
 
-	e := logs[1].Data.(tracer.IssueData)
-	if logs[1].Type != tracer.TypeError || e.Error != "hard" || e.Stack == "" {
-		t.Errorf("error = %+v, want message and a stack trace", e)
+	if warn.Error != "soft" {
+		t.Errorf("warning message = %q, want %q", warn.Error, "soft")
+	}
+
+	if warn.Stack != "" {
+		t.Errorf("warning stack = %q, want empty", warn.Stack)
+	}
+
+	issue := logs[1].Data.(tracer.IssueData)
+	if logs[1].Type != tracer.TypeError {
+		t.Errorf("logs[1].Type = %v, want TypeError", logs[1].Type)
+	}
+
+	if issue.Error != "hard" {
+		t.Errorf("error message = %q, want %q", issue.Error, "hard")
+	}
+
+	if issue.Stack == "" {
+		t.Error("error stack is empty, want a stack trace")
 	}
 }
 
-// TestStop_PanicsWithBreakpointAfterRecording checks record-then-panic.
 func TestStop_PanicsWithBreakpointAfterRecording(t *testing.T) {
 	ctx, d := newCtx()
 
 	defer func() {
 		if _, ok := recover().(tracer.BreakpointSignal); !ok {
-			t.Fatal("Stop should panic with BreakpointSignal when a Debugger is attached")
+			t.Fatal("Stop() did not panic with BreakpointSignal, want it to when a Debugger is attached")
 		}
 
-		if logs := d.Logs(); len(logs) != 1 || logs[0].Label != "state" {
-			t.Fatalf("Logs() = %+v, want the value recorded before stopping", logs)
+		logs := d.Logs()
+		if len(logs) != 1 {
+			t.Fatalf("Logs() = %+v, want 1 entry recorded before stopping", logs)
+		}
+
+		if logs[0].Label != "state" {
+			t.Errorf("Logs()[0].Label = %q, want %q", logs[0].Label, "state")
 		}
 	}()
 

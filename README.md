@@ -609,7 +609,7 @@ Two layers, so another engine can be added without touching the PostgreSQL code:
 
 | Package | Contents |
 |---|---|
-| `database` | Driver-independent: error classification (`Classify`, `Match`, `MatchNotFound`, `IsNotFound`, ...), `RegisterClassifier`, `EscapeLike` (search term → literal inside `LIKE`/`ILIKE`, so `%` and `_` are not wildcards), `MaskDSN` (key=value and URL forms), `Wrapper` (error prefixer for repositories) |
+| `database` | Driver-independent: error classification (`Classify`, `Match`, `MatchNotFound`, `IsNotFound`, ...), `RegisterClassifier`, `EscapeLike` (search term → literal inside `LIKE`/`ILIKE`, so `%` and `_` are not wildcards), `MaskDSN` (key=value and URL forms), `ErrorPrefixer` (error prefixer for repositories) |
 | `database/postgres` | PostgreSQL via [pgx v5](https://github.com/jackc/pgx) `pgxpool`: connection pool, transactions, query logging, Postgres error classifier |
 
 A future engine (e.g. `database/mysql`) is a new sibling package with its own pool, transactions and
@@ -678,16 +678,16 @@ func NewPrimary(lc fx.Lifecycle, opts postgres.Options, log *zap.Logger) (*postg
 }
 ```
 
-**Repository with error mapping** — `database.Wrapper` prefixes errors with the repository and
+**Repository with error mapping** — `database.ErrorPrefixer` prefixes errors with the repository and
 operation while keeping them unwrappable:
 
 ```go
-var wrap = database.Wrapper("user repository")
+var prefixErr = database.ErrorPrefixer("user repository")
 
 func (r *UserRepository) GetByUUID(ctx context.Context, id uuid.UUID) (*domain.User, error) {
 	row, err := sqlc.New(r.db.Executor(ctx)).GetUserByUUID(ctx, id)
 	if err != nil {
-		return nil, wrap("get user", database.MatchNotFound(err, domain.ErrUserNotFound))
+		return nil, prefixErr("get user", database.MatchNotFound(err, domain.ErrUserNotFound))
 	}
 	return mapUser(row), nil
 }

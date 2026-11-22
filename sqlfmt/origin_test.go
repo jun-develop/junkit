@@ -2,6 +2,22 @@
 // itself.
 package sqlfmt_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: origin_test.go
+// Purpose: Verify that Origin reports the caller's file and function, not sqlfmt's own frames.
+// Type: Unit
+//
+// Test functions: 1
+// Total scenarios: 1
+//
+// #  Test Case                     Scenario               Expected Result
+// 1  TestOrigin_PointsAtTheCaller  Called from this test  Location is origin_test.go, function is this test
+//
+// =============================================================================
+
 import (
 	"strings"
 	"testing"
