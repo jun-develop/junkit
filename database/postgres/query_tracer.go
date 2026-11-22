@@ -19,9 +19,7 @@ type queryTracer struct {
 	inlineArgs         bool
 }
 
-// newQueryTracer returns a queryTracer whose logger drops zap's caller and error stack trace: the
-// caller is always this file, and the stack is mostly pgx/gin frames. A failed query logs the
-// application code location that ran it instead (see sqlfmt.Origin).
+// newQueryTracer creates a queryTracer for query logging and slow query detection.
 func newQueryTracer(log *zap.Logger, slowQueryThreshold time.Duration, inlineArgs bool) *queryTracer {
 	log = log.WithOptions(zap.WithCaller(false), zap.AddStacktrace(zapcore.FatalLevel))
 
@@ -66,6 +64,10 @@ func (t *queryTracer) Log(ctx context.Context, level tracelog.LogLevel, msg stri
 	)
 
 	if err, ok := data["err"].(error); ok {
+		if zapLevel < zap.ErrorLevel {
+			zapLevel = zap.ErrorLevel
+		}
+
 		location, function := sqlfmt.Origin()
 		fields = append(fields,
 			zap.Error(err),
@@ -77,6 +79,8 @@ func (t *queryTracer) Log(ctx context.Context, level tracelog.LogLevel, msg stri
 	event := "SQL_EXECUTION"
 	if isSlow {
 		event = "SLOW_QUERY_DETECTION"
+	} else if _, hasErr := data["err"].(error); hasErr {
+		event = "SQL_ERROR"
 	}
 
 	t.log.Log(zapLevel, event, fields...)

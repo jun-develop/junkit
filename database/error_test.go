@@ -1,5 +1,41 @@
 package database_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: error_test.go
+// Purpose: Verify engine-neutral error classification, translation (Match, MatchNotFound),
+//          error prefixing and the Is* predicates, using a fake driver classifier.
+// Type: Unit
+//
+// Test functions: 5
+// Total scenarios: 20
+//
+// #   Test Case                                 Scenario                                    Expected Result
+// 1   TestClassify_MapsErrors                   nil error                                   ErrorNone, empty detail
+// 2   TestClassify_MapsErrors                   Error the registered classifier recognizes  The classifier's type and detail
+// 3   TestClassify_MapsErrors                   Wrapped recognized error                    The classifier's type and detail
+// 4   TestClassify_MapsErrors                   context.DeadlineExceeded                    ErrorConnection, "query timeout or canceled"
+// 5   TestClassify_MapsErrors                   context.Canceled                            ErrorConnection, "query timeout or canceled"
+// 6   TestClassify_MapsErrors                   Unrecognized error                          ErrorUnknown, the error message as detail
+// 7   TestMatch_TranslatesMappedTypes           Unique violation with a mapping for it      Returns the mapped error; IsUniqueViolation is true
+// 8   TestMatchNotFound_TranslatesOnlyNotFound  nil error                                   Returns nil
+// 9   TestMatchNotFound_TranslatesOnlyNotFound  Wrapped not-found error                     Returns the given not-found error
+// 10  TestMatchNotFound_TranslatesOnlyNotFound  Unique violation                            Returns the error unchanged
+// 11  TestErrorPrefixer_PrefixesAndWraps        nil and a driver error                      nil stays nil; error is prefixed and still wraps the original
+// 12  TestPredicates_MatchTheirErrorType        nil error                                   No predicate matches
+// 13  TestPredicates_MatchTheirErrorType        Not found                                   Only IsNotFound
+// 14  TestPredicates_MatchTheirErrorType        Wrapped not found                           Only IsNotFound
+// 15  TestPredicates_MatchTheirErrorType        Unique violation                            Only IsUniqueViolation
+// 16  TestPredicates_MatchTheirErrorType        Foreign key violation                       Only IsForeignKeyViolation
+// 17  TestPredicates_MatchTheirErrorType        Check violation                             Only IsCheckViolation
+// 18  TestPredicates_MatchTheirErrorType        context.DeadlineExceeded                    Only IsConnectionError
+// 19  TestPredicates_MatchTheirErrorType        context.Canceled                            Only IsConnectionError
+// 20  TestPredicates_MatchTheirErrorType        Unrelated error                             No predicate matches
+//
+// =============================================================================
+
 import (
 	"context"
 	"errors"
@@ -54,8 +90,12 @@ func TestClassify_MapsErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			gotType, gotDetail := database.Classify(tt.err)
 
-			if gotType != tt.wantType || gotDetail != tt.wantDetail {
-				t.Fatalf("Classify() = %q, %q, want %q, %q", gotType, gotDetail, tt.wantType, tt.wantDetail)
+			if gotType != tt.wantType {
+				t.Errorf("Classify() type = %q, want %q", gotType, tt.wantType)
+			}
+
+			if gotDetail != tt.wantDetail {
+				t.Errorf("Classify() detail = %q, want %q", gotDetail, tt.wantDetail)
 			}
 		})
 	}
@@ -76,34 +116,40 @@ func TestMatch_TranslatesMappedTypes(t *testing.T) {
 
 func TestMatchNotFound_TranslatesOnlyNotFound(t *testing.T) {
 	errUserNotFound := errors.New("user not found")
-
-	if got := database.MatchNotFound(nil, errUserNotFound); got != nil {
-		t.Errorf("MatchNotFound(nil) = %v, want nil", got)
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "nil error", err: nil, want: nil},
+		{name: "wrapped not-found error", err: fmt.Errorf("get user: %w", errNoRows), want: errUserNotFound},
+		{name: "unique violation is returned unchanged", err: errDuplicate, want: errDuplicate},
 	}
 
-	if got := database.MatchNotFound(fmt.Errorf("get user: %w", errNoRows), errUserNotFound); !errors.Is(got, errUserNotFound) {
-		t.Errorf("MatchNotFound(not found) = %v, want %v", got, errUserNotFound)
-	}
-
-	if got := database.MatchNotFound(errDuplicate, errUserNotFound); !errors.Is(got, errDuplicate) {
-		t.Errorf("MatchNotFound(unique violation) = %v, want the error unchanged", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// errors.Is(got, nil) is true only when got is nil.
+			if got := database.MatchNotFound(tt.err, errUserNotFound); !errors.Is(got, tt.want) {
+				t.Errorf("MatchNotFound(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 
-func TestWrapper_PrefixesAndWraps(t *testing.T) {
-	wrap := database.Wrapper("user repository")
+func TestErrorPrefixer_PrefixesAndWraps(t *testing.T) {
+	prefixErr := database.ErrorPrefixer("user repository")
 
-	if got := wrap("get user", nil); got != nil {
-		t.Errorf("wrap(nil) = %v, want nil", got)
+	if got := prefixErr("get user", nil); got != nil {
+		t.Errorf("prefixErr(nil) = %v, want nil", got)
 	}
 
-	got := wrap("get user", errNoRows)
+	got := prefixErr("get user", errNoRows)
 	if want := "user repository: get user: fake driver: no rows"; got.Error() != want {
-		t.Errorf("wrap() = %q, want %q", got, want)
+		t.Errorf("prefixErr() = %q, want %q", got, want)
 	}
 
 	if !errors.Is(got, errNoRows) {
-		t.Errorf("wrap() = %v, want it to wrap the original error", got)
+		t.Errorf("prefixErr() = %v, want it to wrap the original error", got)
 	}
 }
 

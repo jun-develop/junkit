@@ -52,17 +52,13 @@ type Options struct {
 	// HealthCheckPeriod is how often the pool checks idle connections' health.
 	HealthCheckPeriod time.Duration
 
-	// QueryLogging enables structured per-query logging through the *zap.Logger given to New. SQL is
-	// logged with its placeholders and an arg count, never the argument values. When false, no query
-	// tracer is attached.
+	// QueryLogging enables structured SQL query logging via zap.
 	QueryLogging bool
 
-	// LogQueryArgs inlines argument values into the SQL logged by QueryLogging. Enable it only for
-	// local debugging: arguments include password hashes, token hashes, emails and OTPs.
+	// LogQueryArgs logs query arguments alongside SQL (local debug only).
 	LogQueryArgs bool
 
-	// SlowQueryThreshold escalates any query slower than this to a WARN log entry when QueryLogging
-	// is true. Zero disables slow-query escalation.
+	// SlowQueryThreshold logs queries slower than this as WARN (0 = disabled).
 	SlowQueryThreshold time.Duration
 
 	// Decorate optionally wraps every DBTX handed out by Executor (e.g. for tracing or metrics).
@@ -76,8 +72,7 @@ type DB struct {
 	executor DBTX
 }
 
-// New creates a PostgreSQL connection pool from opts. It does not connect: call Ping to verify the
-// database is reachable, and Close when done. log is used only for query logging; nil disables it.
+// New creates a PostgreSQL connection pool from opts (call Ping to verify connectivity).
 //
 // Usage:
 //
@@ -102,7 +97,6 @@ func New(opts Options, log *zap.Logger) (*DB, error) {
 
 // newPoolConfig parses opts.DSN and applies opts' non-zero pool settings and query tracer.
 func newPoolConfig(opts Options, log *zap.Logger) (*pgxpool.Config, error) {
-	// pgconn redacts the password from its parse errors, so wrapping them leaks no secret.
 	poolConfig, err := pgxpool.ParseConfig(opts.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: parse dsn: %w", err)
@@ -170,8 +164,7 @@ func (d *DB) Executor(ctx context.Context) DBTX {
 	return d.executor
 }
 
-// Ping verifies the database is reachable. There is deliberately no accessor for the raw pool:
-// queries run only through Executor, so they are always traced and join the active transaction.
+// Ping verifies the database is reachable.
 func (d *DB) Ping(ctx context.Context) error {
 	if err := d.pool.Ping(ctx); err != nil {
 		return fmt.Errorf("postgres: ping: %w", err)
@@ -180,7 +173,7 @@ func (d *DB) Ping(ctx context.Context) error {
 	return nil
 }
 
-// Close closes every pooled connection, waiting for in-use ones to be released.
+// Close closes every pooled connection.
 func (d *DB) Close() {
 	d.pool.Close()
 }

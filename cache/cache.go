@@ -1,7 +1,4 @@
-// Package cache provides a generic key-value cache on Redis, in-memory or no-op backends.
-//
-// Build one Store per app (cache.Module does it and closes it on stop), then any number of
-// typed caches on it; every Redis cache shares the Store's single connection pool.
+// Package cache provides generic key-value caching backed by Redis, memory, or no-op.
 //
 // Usage:
 //
@@ -18,11 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Cache is a typed key-value store implemented by Redis, Memory and Noop.
-// Lookup reports whether key was found and any backend error; Get is Lookup with the error
-// treated as a miss. Set stores a value for ttl (0 = no expiry); Incr atomically adds 1 and
-// returns the new value, applying ttl only when it creates the key (a fixed window); GetOrSet
-// calls fetchFn on a miss and stores the result.
+// Cache is a generic key-value cache interface (Redis, Memory, or Noop).
 type Cache[T any] interface {
 	Lookup(ctx context.Context, key string) (T, bool, error)
 	Get(ctx context.Context, key string) (T, bool)
@@ -33,32 +26,29 @@ type Cache[T any] interface {
 	GetOrSet(ctx context.Context, key string, ttl time.Duration, fetchFn func() (T, error)) (T, error)
 }
 
-// Driver selects which Cache implementation New constructs.
+// Driver selects the cache backend implementation.
 type Driver string
 
-// Driver values accepted by NewStore.
+// Supported cache drivers.
 const (
-	// DriverRedis backs the cache with Redis.
-	DriverRedis Driver = "redis"
-	// DriverMemory backs the cache with in-memory storage.
+	DriverRedis  Driver = "redis"
 	DriverMemory Driver = "memory"
-	// DriverNoop disables caching.
-	DriverNoop Driver = "noop"
+	DriverNoop   Driver = "noop"
 )
 
-// Options selects and configures a cache Store.
+// Options configures a cache Store.
 type Options struct {
-	// Driver selects the backend (empty value defaults to DriverNoop).
+	// Driver selects the backend (defaults to DriverNoop).
 	Driver Driver
 
-	// Redis configures the connection when Driver is DriverRedis.
+	// Redis options used when Driver is DriverRedis.
 	Redis RedisOptions
 
-	// Memory configures memory caches, used when Driver is DriverMemory or after OrMemory.
+	// Memory options used when Driver is DriverMemory.
 	Memory MemoryOptions
 }
 
-// withDefaults returns o with defaults applied to its Redis and Memory options.
+// withDefaults applies defaults to Redis and Memory options.
 func (o Options) withDefaults() Options {
 	o.Redis = o.Redis.withDefaults()
 	o.Memory = o.Memory.withDefaults()
@@ -66,15 +56,13 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// Store is the shared storage that caches are built on: one Redis client per app, or none for
-// the memory and no-op drivers.
+// Store manages shared cache storage and connections.
 type Store struct {
 	opts   Options
 	client *redis.Client
 }
 
-// NewStore creates a Store for opts.Driver; with DriverRedis it opens a lazily connecting
-// client that Close releases.
+// NewStore creates a Store configured with opts.
 func NewStore(opts Options) *Store {
 	opts = opts.withDefaults()
 	s := &Store{opts: opts}
@@ -85,9 +73,7 @@ func NewStore(opts Options) *Store {
 	return s
 }
 
-// OrMemory returns s unless it uses Redis, otherwise a memory Store. Use it for counters and
-// blocks that must work without Redis (a no-op cache would never block), accepting that each
-// instance then keeps its own.
+// OrMemory returns s if Redis is used, otherwise a memory-backed Store.
 //
 // Usage:
 //
@@ -103,7 +89,7 @@ func (s *Store) OrMemory() *Store {
 	return &Store{opts: opts}
 }
 
-// Close releases the Redis client, if any. Caches built on s must not be used afterwards.
+// Close releases underlying connections (e.g. Redis client).
 func (s *Store) Close() error {
 	if s.client == nil {
 		return nil
@@ -116,8 +102,7 @@ func (s *Store) Close() error {
 	return nil
 }
 
-// New builds a Cache[T] on s; Redis caches share s's client and memory caches each get their
-// own map.
+// New creates a typed Cache[T] backed by s.
 func New[T any](s *Store) Cache[T] {
 	switch s.opts.Driver {
 	case DriverRedis:

@@ -132,9 +132,7 @@ func fields(t reflect.Type, tagKey string) []field {
 	return out
 }
 
-// applyRules turns a validator binding tag into schema keywords on s and reports whether the field
-// is required. Rules after "dive" apply to the items of a slice. Rules OpenAPI cannot express (custom
-// validators) are listed in the description.
+// applyRules converts binding tags into schema constraints and reports whether the field is required.
 func applyRules(s map[string]any, binding string) bool {
 	if binding == "" {
 		return false
@@ -230,8 +228,7 @@ func typed(s map[string]any, v string) any {
 	return v
 }
 
-// structSchema returns the object schema of struct t, or a bare object when t is already being
-// walked (a recursive type).
+// structSchema builds an object schema for struct t (handles recursive types).
 func structSchema(t reflect.Type, tagKey string, seen map[reflect.Type]bool) map[string]any {
 	if seen[t] {
 		return map[string]any{"type": "object"}
