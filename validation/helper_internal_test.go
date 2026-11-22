@@ -1,8 +1,34 @@
 package validation
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: helper_internal_test.go
+// Purpose: Verify the name helpers that turn Go field paths into snake_case error keys.
+// Type: Unit
+//
+// Test functions: 2
+// Total scenarios: 11
+//
+// #   Test Case                                 Scenario                               Expected Result
+// 1   TestCamelToSnake_ConvertsIdentifiers      Two words ("UserName")                 "user_name"
+// 2   TestCamelToSnake_ConvertsIdentifiers      Already lowercase                      Unchanged
+// 3   TestCamelToSnake_ConvertsIdentifiers      Trailing acronym ("UserID")            "user_id"
+// 4   TestCamelToSnake_ConvertsIdentifiers      Acronym followed by a word ("APIKey")  "api_key"
+// 5   TestCamelToSnake_ConvertsIdentifiers      Long PascalCase                        "create_user_request"
+// 6   TestCamelToSnake_ConvertsIdentifiers      Empty string                           Empty string
+// 7   TestNormalizeFieldPath_ConvertsNamespace  Root struct name present               Root dropped
+// 8   TestNormalizeFieldPath_ConvertsNamespace  CamelCase segment                      Converted to snake_case
+// 9   TestNormalizeFieldPath_ConvertsNamespace  Embedded Request segment               Segment dropped
+// 10  TestNormalizeFieldPath_ConvertsNamespace  Nested struct path                     Dot separators kept
+// 11  TestNormalizeFieldPath_ConvertsNamespace  Slice index in the path                Index kept on its segment
+//
+// =============================================================================
+
 import "testing"
 
-func TestCamelToSnake(t *testing.T) {
+func TestCamelToSnake_ConvertsIdentifiers(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
@@ -25,7 +51,7 @@ func TestCamelToSnake(t *testing.T) {
 	}
 }
 
-func TestNormalizeFieldPath(t *testing.T) {
+func TestNormalizeFieldPath_ConvertsNamespace(t *testing.T) {
 	tests := []struct {
 		name      string
 		namespace string

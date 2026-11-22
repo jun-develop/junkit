@@ -1,5 +1,27 @@
 package tracer_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: http_test.go
+// Purpose: Verify the request/server details that ServerInfo and HTTPInfo record.
+// Type: Unit
+//
+// Test functions: 4
+// Total scenarios: 7
+//
+// #  Test Case                                            Scenario                                             Expected Result
+// 1  TestServerInfo_MasksSecretsAndReportsRequestDetails  GET with secrets in query, Authorization and Cookie  Reports method, path, URL, host, port, RemoteAddr IP, user agent; secrets masked
+// 2  TestServerInfo_SplitsHostAndPort                     Host with port                                       host and host_port split
+// 3  TestServerInfo_SplitsHostAndPort                     Bare host, no port                                   host set, host_port empty
+// 4  TestServerInfo_SplitsHostAndPort                     IPv4 with port                                       host and host_port split
+// 5  TestHTTPInfo_RecordsRequestInfoEntry                 No Debugger                                          No panic
+// 6  TestHTTPInfo_RecordsRequestInfoEntry                 Debugger attached                                    One "REQUEST & SERVER INFO" variable entry
+// 7  TestHTTPInfo_GinContextUsesClientIP                  gin.Context, no trusted proxy, spoofed IP headers    client_ip is gin's ClientIP (RemoteAddr), not the spoofed IP
+//
+// =============================================================================
+
 import (
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +32,6 @@ import (
 	"github.com/jun-develop/junkit/tracer"
 )
 
-// TestServerInfo_MasksSecretsAndReportsRequestDetails checks details and masking.
 func TestServerInfo_MasksSecretsAndReportsRequestDetails(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/users/1?foo=bar&token=abc", nil)
 	r.Host = "api.example.com:8080"
@@ -37,8 +58,12 @@ func TestServerInfo_MasksSecretsAndReportsRequestDetails(t *testing.T) {
 		t.Errorf(`info["full_url"] = %v, want %q`, info["full_url"], want)
 	}
 
-	if info["host"] != "api.example.com" || info["host_port"] != "8080" {
-		t.Errorf(`info["host"], info["host_port"] = %v, %v, want "api.example.com", "8080"`, info["host"], info["host_port"])
+	if info["host"] != "api.example.com" {
+		t.Errorf(`info["host"] = %v, want %q`, info["host"], "api.example.com")
+	}
+
+	if info["host_port"] != "8080" {
+		t.Errorf(`info["host_port"] = %v, want %q`, info["host_port"], "8080")
 	}
 
 	if info["client_ip"] != "192.0.2.1" {
@@ -49,19 +74,16 @@ func TestServerInfo_MasksSecretsAndReportsRequestDetails(t *testing.T) {
 		t.Errorf(`info["user_agent"] = %v, want %q`, info["user_agent"], "test-agent")
 	}
 
-	auth, _ := info["authorization"].(string)
-	if auth == "Bearer abcdefghijklmnopqrstuvwxyz" {
-		t.Error("authorization header should be masked, not passed through verbatim")
+	if auth, _ := info["authorization"].(string); auth == "Bearer abcdefghijklmnopqrstuvwxyz" {
+		t.Errorf(`info["authorization"] = %q, want it masked`, auth)
 	}
 
-	cookie, _ := info["cookie"].(string)
-	if cookie == "session=super-secret; theme=dark" {
-		t.Error("cookie header should be masked, not passed through verbatim")
+	if cookie, _ := info["cookie"].(string); cookie == "session=super-secret; theme=dark" {
+		t.Errorf(`info["cookie"] = %q, want it masked`, cookie)
 	}
 }
 
-// TestSplitHostPort checks splitHostPort with and without a port.
-func TestSplitHostPort(t *testing.T) {
+func TestServerInfo_SplitsHostAndPort(t *testing.T) {
 	tests := []struct {
 		name     string
 		addr     string
@@ -90,29 +112,41 @@ func TestSplitHostPort(t *testing.T) {
 	}
 }
 
-// TestHTTPInfo checks HTTPInfo records one info entry and is a no-op without a Debugger.
-func TestHTTPInfo(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+func TestHTTPInfo_RecordsRequestInfoEntry(t *testing.T) {
+	t.Run("no debugger", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
 
-	// No Debugger: must not panic.
-	tracer.HTTPInfo(r.Context(), r)
+		// Passes if this does not panic.
+		tracer.HTTPInfo(r.Context(), r)
+	})
 
-	d := tracer.New()
-	tracer.HTTPInfo(tracer.WithContext(r.Context(), d), r)
+	t.Run("debugger attached", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		d := tracer.New()
 
-	logs := d.Logs()
-	if len(logs) != 1 || logs[0].Type != tracer.TypeVariable || logs[0].Label != "REQUEST & SERVER INFO" {
-		t.Fatalf("Logs() = %+v, want one REQUEST & SERVER INFO variable entry", logs)
-	}
+		tracer.HTTPInfo(tracer.WithContext(r.Context(), d), r)
+
+		logs := d.Logs()
+		if len(logs) != 1 {
+			t.Fatalf("Logs() = %+v, want 1 entry", logs)
+		}
+
+		if logs[0].Type != tracer.TypeVariable {
+			t.Errorf("entry Type = %v, want TypeVariable", logs[0].Type)
+		}
+
+		if logs[0].Label != "REQUEST & SERVER INFO" {
+			t.Errorf("entry Label = %q, want %q", logs[0].Label, "REQUEST & SERVER INFO")
+		}
+	})
 }
 
-// TestHTTPInfo_GinContextUsesClientIP checks trusted-proxy handling.
 func TestHTTPInfo_GinContextUsesClientIP(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, engine := gin.CreateTestContext(httptest.NewRecorder())
 	// No trusted proxy: the spoofed headers must be ignored.
 	if err := engine.SetTrustedProxies(nil); err != nil {
-		t.Fatal(err)
+		t.Fatalf("SetTrustedProxies(nil) error = %v", err)
 	}
 
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
@@ -123,8 +157,17 @@ func TestHTTPInfo_GinContextUsesClientIP(t *testing.T) {
 	c.Request = c.Request.WithContext(tracer.WithContext(c.Request.Context(), d))
 	tracer.HTTPInfo(c, c.Request)
 
-	info := d.Logs()[0].Data.(map[string]any)
-	if info["client_ip"] != c.ClientIP() || info["client_ip"] != "192.0.2.1" {
-		t.Fatalf(`client_ip = %v, want gin's ClientIP %q`, info["client_ip"], c.ClientIP())
+	logs := d.Logs()
+	if len(logs) != 1 {
+		t.Fatalf("Logs() = %+v, want 1 entry", logs)
+	}
+
+	info := logs[0].Data.(map[string]any)
+	if info["client_ip"] != c.ClientIP() {
+		t.Errorf("client_ip = %v, want gin's ClientIP %q", info["client_ip"], c.ClientIP())
+	}
+
+	if info["client_ip"] != "192.0.2.1" {
+		t.Errorf("client_ip = %v, want the RemoteAddr %q, not the spoofed header", info["client_ip"], "192.0.2.1")
 	}
 }

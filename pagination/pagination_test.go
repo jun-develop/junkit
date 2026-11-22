@@ -1,7 +1,53 @@
 package pagination_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: pagination_test.go
+// Purpose: Verify page metadata calculation and request defaults, offset and limit clamping.
+// Type: Unit
+//
+// Test functions: 4
+// Total scenarios: 29
+//
+// #   Test Case                                   Scenario                     Expected Result
+// 1   TestNewPagination_ComputesPageMetadata      Middle page                  Has next and prev pages
+// 2   TestNewPagination_ComputesPageMetadata      First page                   Has next page, no prev page
+// 3   TestNewPagination_ComputesPageMetadata      Last page                    Has prev page, no next page
+// 4   TestNewPagination_ComputesPageMetadata      No items                     One total page, no next or prev
+// 5   TestNewPagination_ComputesPageMetadata      Page 0                       Page clamped to 1
+// 6   TestNewPagination_ComputesPageMetadata      Negative page size           Page size clamped to 1
+// 7   TestNewPagination_ComputesPageMetadata      Page far past the last       Page kept; prev page is the last page
+// 8   TestNewPagination_ComputesPageMetadata      Page one past the last       Prev page is the last page
+// 9   TestRequest_SetDefaults_FillsMissingFields  Empty request                Every field gets its default
+// 10  TestRequest_SetDefaults_FillsMissingFields  All fields already set       Fields left unchanged
+// 11  TestRequest_SetDefaults_FillsMissingFields  Negative page and page size  Page and page size get defaults
+// 12  TestRequest_GetOffset_ReturnsClampedOffset  Page 1                       Offset 0
+// 13  TestRequest_GetOffset_ReturnsClampedOffset  Page 2, size 10              Offset 10
+// 14  TestRequest_GetOffset_ReturnsClampedOffset  Page 3, size 5               Offset 10
+// 15  TestRequest_GetOffset_ReturnsClampedOffset  Offset beyond int32          Clamped to math.MaxInt32
+// 16  TestRequest_GetOffset_ReturnsClampedOffset  Offset overflows int64       Clamped to math.MaxInt32
+// 17  TestRequest_GetOffset_ReturnsClampedOffset  Last page that fits int32    Exact offset 2147483640
+// 18  TestRequest_GetOffset_ReturnsClampedOffset  Page 0                       Offset 0
+// 19  TestRequest_GetOffset_ReturnsClampedOffset  Negative page                Offset 0
+// 20  TestRequest_GetOffset_ReturnsClampedOffset  Negative page size           Uses the clamped limit (1)
+// 21  TestRequest_GetOffset_ReturnsClampedOffset  Page size 0                  Uses the clamped limit (1)
+// 22  TestRequest_GetOffset_ReturnsClampedOffset  Page size 1000               Uses the clamped limit (100)
+// 23  TestRequest_GetLimit_ClampsPageSize         Page size 25                 25
+// 24  TestRequest_GetLimit_ClampsPageSize         Page size 1 (lower bound)    1
+// 25  TestRequest_GetLimit_ClampsPageSize         Page size 100 (upper bound)  100
+// 26  TestRequest_GetLimit_ClampsPageSize         Page size 0                  Clamped to 1
+// 27  TestRequest_GetLimit_ClampsPageSize         Negative page size           Clamped to 1
+// 28  TestRequest_GetLimit_ClampsPageSize         Page size 101                Clamped to 100
+// 29  TestRequest_GetLimit_ClampsPageSize         Page size math.MaxInt        Clamped to 100
+//
+// =============================================================================
+
 import (
+	"fmt"
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/jun-develop/junkit/pagination"
@@ -10,7 +56,21 @@ import (
 // intPtr returns a pointer to v.
 func intPtr(v int) *int { return &v }
 
-func TestNewPagination(t *testing.T) {
+// formatPagination prints p with NextPage and PrevPage dereferenced, so failures show values, not addresses.
+func formatPagination(p pagination.Pagination) string {
+	deref := func(v *int) any {
+		if v == nil {
+			return nil
+		}
+
+		return *v
+	}
+
+	return fmt.Sprintf("{Page:%d PageSize:%d TotalItems:%d TotalPages:%d HasNext:%v HasPrev:%v NextPage:%v PrevPage:%v}",
+		p.Page, p.PageSize, p.TotalItems, p.TotalPages, p.HasNext, p.HasPrev, deref(p.NextPage), deref(p.PrevPage))
+}
+
+func TestNewPagination_ComputesPageMetadata(t *testing.T) {
 	tests := []struct {
 		name       string
 		page       int
@@ -111,103 +171,51 @@ func TestNewPagination(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := pagination.NewPagination(tt.page, tt.pageSize, tt.totalItems)
 
-			if got.Page != tt.want.Page ||
-				got.PageSize != tt.want.PageSize ||
-				got.TotalItems != tt.want.TotalItems ||
-				got.TotalPages != tt.want.TotalPages ||
-				got.HasNext != tt.want.HasNext ||
-				got.HasPrev != tt.want.HasPrev {
-				t.Fatalf("NewPagination(%d, %d, %d) = %+v, want %+v",
-					tt.page, tt.pageSize, tt.totalItems, got, tt.want)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("NewPagination(%d, %d, %d) = %s, want %s",
+					tt.page, tt.pageSize, tt.totalItems, formatPagination(got), formatPagination(tt.want))
 			}
-
-			assertIntPtrEqual(t, "NextPage", got.NextPage, tt.want.NextPage)
-			assertIntPtrEqual(t, "PrevPage", got.PrevPage, tt.want.PrevPage)
 		})
 	}
 }
 
-// assertIntPtrEqual fails the test if got and want differ in nil-ness or value.
-func assertIntPtrEqual(t *testing.T, field string, got, want *int) {
-	t.Helper()
-
-	switch {
-	case got == nil && want == nil:
-		return
-	case got == nil || want == nil:
-		t.Fatalf("%s = %v, want %v", field, derefOrNil(got), derefOrNil(want))
-	case *got != *want:
-		t.Fatalf("%s = %d, want %d", field, *got, *want)
-	}
-}
-
-// derefOrNil returns *p, or nil when p is nil.
-func derefOrNil(p *int) any {
-	if p == nil {
-		return nil
-	}
-
-	return *p
-}
-
-func TestRequest_SetDefaults(t *testing.T) {
+func TestRequest_SetDefaults_FillsMissingFields(t *testing.T) {
 	tests := []struct {
-		name             string
-		req              pagination.Request
-		defaultSortBy    string
-		defaultSortOrder string
-		wantPage         int
-		wantPageSize     int
-		wantSortBy       string
-		wantSortOrder    string
+		name string
+		req  pagination.Request
+		want pagination.Request
 	}{
 		{
-			name:             "empty request gets every default",
-			req:              pagination.Request{},
-			defaultSortBy:    "created_at",
-			defaultSortOrder: "desc",
-			wantPage:         1,
-			wantPageSize:     10,
-			wantSortBy:       "created_at",
-			wantSortOrder:    "desc",
+			name: "empty request gets every default",
+			req:  pagination.Request{},
+			want: pagination.Request{Page: 1, PageSize: 10, SortBy: "created_at", SortOrder: "desc"},
 		},
 		{
-			name:             "already-set fields are left untouched",
-			req:              pagination.Request{Page: 3, PageSize: 25, SortBy: "name", SortOrder: "asc"},
-			defaultSortBy:    "created_at",
-			defaultSortOrder: "desc",
-			wantPage:         3,
-			wantPageSize:     25,
-			wantSortBy:       "name",
-			wantSortOrder:    "asc",
+			name: "already-set fields are left untouched",
+			req:  pagination.Request{Page: 3, PageSize: 25, SortBy: "name", SortOrder: "asc"},
+			want: pagination.Request{Page: 3, PageSize: 25, SortBy: "name", SortOrder: "asc"},
 		},
 		{
-			name:             "negative page and page_size fall back to defaults too",
-			req:              pagination.Request{Page: -1, PageSize: -1},
-			defaultSortBy:    "created_at",
-			defaultSortOrder: "desc",
-			wantPage:         1,
-			wantPageSize:     10,
-			wantSortBy:       "created_at",
-			wantSortOrder:    "desc",
+			name: "negative page and page_size fall back to defaults too",
+			req:  pagination.Request{Page: -1, PageSize: -1},
+			want: pagination.Request{Page: 1, PageSize: 10, SortBy: "created_at", SortOrder: "desc"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := tt.req
-			req.SetDefaults(tt.defaultSortBy, tt.defaultSortOrder)
 
-			if req.Page != tt.wantPage || req.PageSize != tt.wantPageSize ||
-				req.SortBy != tt.wantSortBy || req.SortOrder != tt.wantSortOrder {
-				t.Fatalf("SetDefaults() = %+v, want page=%d page_size=%d sort_by=%q sort_order=%q",
-					req, tt.wantPage, tt.wantPageSize, tt.wantSortBy, tt.wantSortOrder)
+			req.SetDefaults("created_at", "desc")
+
+			if req != tt.want {
+				t.Fatalf("SetDefaults(created_at, desc) = %+v, want %+v", req, tt.want)
 			}
 		})
 	}
 }
 
-func TestRequest_GetOffset(t *testing.T) {
+func TestRequest_GetOffset_ReturnsClampedOffset(t *testing.T) {
 	tests := []struct {
 		name string
 		req  pagination.Request
@@ -235,7 +243,7 @@ func TestRequest_GetOffset(t *testing.T) {
 	}
 }
 
-func TestRequest_GetLimit(t *testing.T) {
+func TestRequest_GetLimit_ClampsPageSize(t *testing.T) {
 	tests := []struct {
 		name     string
 		pageSize int

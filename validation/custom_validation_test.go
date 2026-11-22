@@ -1,5 +1,62 @@
 package validation_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: custom_validation_test.go
+// Purpose: Verify each custom validation tag registered by RegisterCustomValidation (offline only).
+// Type: Unit
+//
+// Test functions: 12
+// Total scenarios: 42
+//
+// #   Test Case                                        Scenario                           Expected Result
+// 1   TestValidator_PasswordStrongTag                  Meets every requirement            Valid
+// 2   TestValidator_PasswordStrongTag                  Too short                          Invalid
+// 3   TestValidator_PasswordStrongTag                  Missing uppercase                  Invalid
+// 4   TestValidator_PasswordStrongTag                  Missing lowercase                  Invalid
+// 5   TestValidator_PasswordStrongTag                  Missing digit                      Invalid
+// 6   TestValidator_PasswordStrongTag                  Missing special character          Invalid
+// 7   TestValidator_SlugTag                            Simple slug                        Valid
+// 8   TestValidator_SlugTag                            Dot separator                      Valid
+// 9   TestValidator_SlugTag                            Uppercase letters                  Invalid
+// 10  TestValidator_SlugTag                            Spaces                             Invalid
+// 11  TestValidator_SlugTag                            Leading dash                       Invalid
+// 12  TestValidator_SearchTag                          Letters, digits and spaces         Valid
+// 13  TestValidator_SearchTag                          Special characters                 Invalid
+// 14  TestValidator_MinIntMaxIntTags                   Within range                       Valid
+// 15  TestValidator_MinIntMaxIntTags                   At the minimum                     Valid
+// 16  TestValidator_MinIntMaxIntTags                   At the maximum                     Valid
+// 17  TestValidator_MinIntMaxIntTags                   Below the minimum                  Invalid
+// 18  TestValidator_MinIntMaxIntTags                   Above the maximum                  Invalid
+// 19  TestValidator_MinIntMaxIntTagsNonIntFields       uint within range                  Valid
+// 20  TestValidator_MinIntMaxIntTagsNonIntFields       uint above the maximum             Invalid
+// 21  TestValidator_MinIntMaxIntTagsNonIntFields       Tag on a string field              Invalid (no panic)
+// 22  TestValidator_MaxIntTagRejectsUnusableParameter  max_int=abc                        Invalid
+// 23  TestValidator_MaxIntTagRejectsUnusableParameter  max_int=-1 on a uint field         Invalid (no unsigned value is <= -1)
+// 24  TestValidator_FileExtTag                         Allowed extension                  Valid
+// 25  TestValidator_FileExtTag                         Allowed extension in upper case    Valid
+// 26  TestValidator_FileExtTag                         Disallowed extension               Invalid
+// 27  TestValidator_FileExtTag                         No extension                       Invalid
+// 28  TestValidator_AlphanumDashTag                    Letters, digits, dash, underscore  Valid
+// 29  TestValidator_AlphanumDashTag                    Contains a dot                     Invalid
+// 30  TestValidator_DateTags                           date: YYYY-MM-DD                   Valid
+// 31  TestValidator_DateTags                           date: other format                 Invalid
+// 32  TestValidator_DateTags                           date_past: date before now         Valid
+// 33  TestValidator_DateTags                           date_past: future date             Invalid
+// 34  TestValidator_PhoneAdvancedTag                   With country code                  Valid
+// 35  TestValidator_PhoneAdvancedTag                   Without country code               Valid
+// 36  TestValidator_PhoneAdvancedTag                   Too short                          Invalid
+// 37  TestValidator_PhoneAdvancedTag                   Contains letters                   Invalid
+// 38  TestValidator_EmailAdvancedTag                   Malformed address                  Invalid
+// 39  TestValidator_EmailAdvancedTag                   Disposable domain                  Invalid before any DNS lookup
+// 40  TestNewValidator_LoadsBlocklistFromPath          Domain listed in the file          Email rejected
+// 41  TestNewValidator_LoadsBlocklistFromPath          Upper-case entry in the file       Email rejected (offline smoke test; matching proven in internal test)
+// 42  TestNewValidator_LoadsBlocklistFromPath          Blocklist file missing             NewValidator returns os.ErrNotExist
+//
+// =============================================================================
+
 import (
 	"errors"
 	"os"
@@ -163,6 +220,34 @@ func TestValidator_MinIntMaxIntTagsNonIntFields(t *testing.T) {
 	}
 }
 
+func TestValidator_MaxIntTagRejectsUnusableParameter(t *testing.T) {
+	v := newTestValidator(t)
+
+	type nonNumericParam struct {
+		Age int `validate:"max_int=abc"`
+	}
+
+	type negativeMaxOnUint struct {
+		Count uint `validate:"max_int=-1"`
+	}
+
+	tests := []struct {
+		name string
+		form any
+	}{
+		{"non-numeric parameter", nonNumericParam{Age: 1}},
+		{"negative maximum on an unsigned field", negativeMaxOnUint{Count: 0}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := v.Struct(tt.form); err == nil {
+				t.Errorf("Struct(%+v) error = nil, want a max_int validation error", tt.form)
+			}
+		})
+	}
+}
+
 func TestValidator_FileExtTag(t *testing.T) {
 	v := newTestValidator(t)
 
@@ -302,7 +387,7 @@ func TestValidator_EmailAdvancedTag(t *testing.T) {
 	}
 }
 
-func TestNewValidator_BlocklistPath(t *testing.T) {
+func TestNewValidator_LoadsBlocklistFromPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blocklist.conf")
 	if err := os.WriteFile(path, []byte("throwaway.example\n\nANOTHER.example\n"), 0o644); err != nil {
@@ -319,15 +404,23 @@ func TestNewValidator_BlocklistPath(t *testing.T) {
 	}
 
 	// Listed domains are rejected before any DNS lookup, so these stay offline.
-	for _, email := range []string{"a@throwaway.example", "a@another.example"} {
-		t.Run(email, func(t *testing.T) {
-			if err := engine.Struct(form{Email: email}); err == nil {
-				t.Fatalf("email %q: validate error = nil, want the blocklisted domain rejected", email)
+	tests := []struct {
+		name  string
+		email string
+	}{
+		{"domain listed in the file", "a@throwaway.example"},
+		{"domain listed in upper case", "a@another.example"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := engine.Struct(form{Email: tt.email}); err == nil {
+				t.Fatalf("email %q: validate error = nil, want the blocklisted domain rejected", tt.email)
 			}
 		})
 	}
 
-	t.Run("missing file", func(t *testing.T) {
+	t.Run("blocklist file missing", func(t *testing.T) {
 		_, err := validation.NewValidator(validation.Options{BlocklistPath: filepath.Join(dir, "missing.conf")}, nil)
 		if !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("NewValidator() error = %v, want os.ErrNotExist", err)

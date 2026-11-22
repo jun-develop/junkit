@@ -1,5 +1,32 @@
 package logger_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: logger_test.go
+// Purpose: Verify logger construction (outputs, levels, buffering), trace IDs and named Fx channels.
+// Type: Unit (file output uses a temporary directory; ProvideNamed tests start an fxtest app)
+//
+// Test functions: 10
+// Total scenarios: 12
+//
+// #   Test Case                                        Scenario                                Expected Result
+// 1   TestNew_DevelopmentLogsToStdoutOnly              Development environment, debug level    Debug enabled; one OnStop flush hook that succeeds
+// 2   TestNew_NonDevelopmentWritesToFile               Production environment with a filename  Logged line is written to the file
+// 3   TestNew_OutputFileOverridesDevelopment           Development with Output=file            Logged line is written to the file
+// 4   TestNew_FileOutputIsBufferedUntilFlushed         Log a line, then run OnStop             Line absent before the flush, present after
+// 5   TestNew_ParsesLevel                              Empty level                             Defaults to info (debug off, info on)
+// 6   TestNew_ParsesLevel                              "debug" level                           Debug and info enabled
+// 7   TestNew_ParsesLevel                              Unknown level                           Returns a "logger: ..." error
+// 8   TestGetTraceID_ReturnsIDSetByWithTraceID         Plain context, then WithTraceID         Empty, then the stored ID
+// 9   TestGetTraceID_NilContextReturnsEmpty            nil context                             Returns an empty string
+// 10  TestGetTraceID_IgnoresRawStringKey               "trace_id" stored under a string key    Returns an empty string
+// 11  TestProvideNamed_EachChannelResolvesByItsTag     Three named channels                    Each resolves by tag and writes to its own file; "app" is also untagged
+// 12  TestProvideNamed_UnnamedDefinitionDefaultsToApp  Definition without a name               Resolves under name:"app"
+//
+// =============================================================================
+
 import (
 	"context"
 	"os"
@@ -23,6 +50,20 @@ type fakeLifecycle struct {
 // Append records h.
 func (f *fakeLifecycle) Append(h fx.Hook) {
 	f.hooks = append(f.hooks, h)
+}
+
+// assertFileContains fails the test if path does not exist or does not contain want.
+func assertFileContains(t *testing.T, path, want string) {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", path, err)
+	}
+
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("%s = %q, want it to contain %q", path, data, want)
+	}
 }
 
 func TestNew_DevelopmentLogsToStdoutOnly(t *testing.T) {
@@ -100,12 +141,40 @@ func TestNew_OutputFileOverridesDevelopment(t *testing.T) {
 		t.Fatalf("OnStop() error = %v", err)
 	}
 
-	if data, err := os.ReadFile(logPath); err != nil || len(data) == 0 {
-		t.Fatalf("want the line written to %s, got err=%v len=%d", logPath, err, len(data))
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected a log file at %s: %v", logPath, err)
+	}
+
+	if len(data) == 0 {
+		t.Fatal("log file is empty, want the logged line written to it")
 	}
 }
 
-func TestNew_Level(t *testing.T) {
+func TestNew_FileOutputIsBufferedUntilFlushed(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "app.log")
+	lc := &fakeLifecycle{}
+
+	log, err := logger.New(logger.Options{Environment: "production", Level: "info", Filename: logPath, MaxSize: 1}, lc)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	log.Info("buffered line")
+
+	// The read error is ignored on purpose: before a flush the file may not exist yet.
+	if data, _ := os.ReadFile(logPath); strings.Contains(string(data), "buffered line") {
+		t.Fatal("line reached the file before a flush, want it buffered")
+	}
+
+	if err := lc.hooks[0].OnStop(context.Background()); err != nil {
+		t.Fatalf("OnStop() error = %v", err)
+	}
+
+	assertFileContains(t, logPath, "buffered line")
+}
+
+func TestNew_ParsesLevel(t *testing.T) {
 	tests := []struct {
 		name      string
 		level     string
@@ -121,7 +190,11 @@ func TestNew_Level(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			log, err := logger.New(logger.Options{Environment: "development", Level: tt.level}, &fakeLifecycle{})
 			if tt.wantErr {
-				if err == nil || !strings.HasPrefix(err.Error(), "logger: ") {
+				if err == nil {
+					t.Fatal("New() error = nil, want an error")
+				}
+
+				if !strings.HasPrefix(err.Error(), "logger: ") {
 					t.Fatalf("New() error = %v, want a \"logger: ...\" error", err)
 				}
 
@@ -137,13 +210,13 @@ func TestNew_Level(t *testing.T) {
 			}
 
 			if !log.Core().Enabled(zapcore.InfoLevel) {
-				t.Error("info should be enabled")
+				t.Error("info enabled = false, want true")
 			}
 		})
 	}
 }
 
-func TestGetTraceID_RoundTripsWithTraceID(t *testing.T) {
+func TestGetTraceID_ReturnsIDSetByWithTraceID(t *testing.T) {
 	if got := logger.GetTraceID(context.Background()); got != "" {
 		t.Fatalf("GetTraceID() on a plain context = %q, want empty", got)
 	}
@@ -154,7 +227,7 @@ func TestGetTraceID_RoundTripsWithTraceID(t *testing.T) {
 	}
 }
 
-func TestGetTraceID_NilContext(t *testing.T) {
+func TestGetTraceID_NilContextReturnsEmpty(t *testing.T) {
 	if got := logger.GetTraceID(nil); got != "" {
 		t.Fatalf("GetTraceID(nil) = %q, want empty", got)
 	}
@@ -193,8 +266,16 @@ func TestProvideNamed_EachChannelResolvesByItsTag(t *testing.T) {
 	app.RequireStart()
 	defer app.RequireStop()
 
-	if appLogger == nil || httpLogger == nil || sqlLogger == nil {
-		t.Fatal("expected all three named loggers to resolve, got a nil one")
+	if appLogger == nil {
+		t.Fatal(`name:"app" logger = nil, want it resolved`)
+	}
+
+	if httpLogger == nil {
+		t.Fatal(`name:"http" logger = nil, want it resolved`)
+	}
+
+	if sqlLogger == nil {
+		t.Fatal(`name:"sql" logger = nil, want it resolved`)
 	}
 
 	if plainLogger == nil {
@@ -235,43 +316,5 @@ func TestProvideNamed_UnnamedDefinitionDefaultsToApp(t *testing.T) {
 
 	if appLogger == nil {
 		t.Fatal("a Definition with an empty Name should still resolve under name:\"app\"")
-	}
-}
-
-// assertFileContains fails the test if path does not exist or does not contain want.
-func assertFileContains(t *testing.T, path, want string) {
-	t.Helper()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("failed to read %s: %v", path, err)
-	}
-
-	if !strings.Contains(string(data), want) {
-		t.Fatalf("%s = %q, want it to contain %q", path, data, want)
-	}
-}
-
-func TestNew_FileOutputIsBufferedUntilFlushed(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "app.log")
-	lc := &fakeLifecycle{}
-
-	log, err := logger.New(logger.Options{Environment: "production", Level: "info", Filename: logPath, MaxSize: 1}, lc)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	log.Info("buffered line")
-
-	if data, _ := os.ReadFile(logPath); strings.Contains(string(data), "buffered line") {
-		t.Fatal("line reached the file before a flush, want it buffered")
-	}
-
-	if err := lc.hooks[0].OnStop(context.Background()); err != nil {
-		t.Fatalf("OnStop() error = %v", err)
-	}
-
-	if data, _ := os.ReadFile(logPath); !strings.Contains(string(data), "buffered line") {
-		t.Fatal("line missing after OnStop, want it flushed")
 	}
 }

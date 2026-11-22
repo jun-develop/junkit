@@ -1,5 +1,28 @@
 package validation_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: bind_test.go
+// Purpose: Verify BindJSON, BindQuery and ParseUUID through a real gin router.
+// Type: Unit
+//
+// Test functions: 1
+// Total scenarios: 8
+//
+// #  Test Case                                  Scenario                               Expected Result
+// 1  TestBindHelpers_RespondWithExpectedStatus  BindJSON with a valid body             204 (handler continues)
+// 2  TestBindHelpers_RespondWithExpectedStatus  BindJSON missing a required field      422
+// 3  TestBindHelpers_RespondWithExpectedStatus  BindQuery with a valid page            204
+// 4  TestBindHelpers_RespondWithExpectedStatus  BindQuery missing the required page    422
+// 5  TestBindHelpers_RespondWithExpectedStatus  BindQuery with page below the minimum  422
+// 6  TestBindHelpers_RespondWithExpectedStatus  BindQuery with a non-numeric page      422
+// 7  TestBindHelpers_RespondWithExpectedStatus  ParseUUID with a valid UUID            204
+// 8  TestBindHelpers_RespondWithExpectedStatus  ParseUUID with an invalid UUID         422
+//
+// =============================================================================
+
 import (
 	"net/http"
 	"net/http/httptest"
@@ -13,12 +36,12 @@ import (
 	"github.com/jun-develop/junkit/validation"
 )
 
-// TestBind covers BindJSON, BindQuery and ParseUUID through a real gin router.
-func TestBind(t *testing.T) {
+func TestBindHelpers_RespondWithExpectedStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	responder := response.NewResponder(i18n.NewTranslator())
 	v := newValidator(t, validation.Options{})
 
+	// run serves one request through a fresh router whose only route is handle.
 	run := func(t *testing.T, path, target, body string, handle gin.HandlerFunc) *httptest.ResponseRecorder {
 		t.Helper()
 		r := gin.New()
@@ -79,7 +102,9 @@ func TestBind(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if w := run(t, tt.path, tt.target, tt.body, tt.handle); w.Code != tt.want {
+			w := run(t, tt.path, tt.target, tt.body, tt.handle)
+
+			if w.Code != tt.want {
 				t.Fatalf("status = %d, want %d (body %s)", w.Code, tt.want, w.Body.String())
 			}
 		})

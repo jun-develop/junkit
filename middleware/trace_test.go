@@ -1,5 +1,27 @@
 package middleware_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: trace_test.go
+// Purpose: Verify the Trace middleware assigns a safe trace ID and stores build metadata.
+// Type: Unit
+//
+// Test functions: 4
+// Total scenarios: 7
+//
+// #  Test Case                                    Scenario                              Expected Result
+// 1  TestTrace_GeneratesATraceIDWhenNoneProvided  No incoming trace ID                  Response header set and equal to the ID in the request context
+// 2  TestTrace_IncomingTraceIDOnlyWhenTrusted     Incoming ID, TrustHeader true         Incoming ID reused in header and context
+// 3  TestTrace_IncomingTraceIDOnlyWhenTrusted     Incoming ID, TrustHeader false        New ID generated, header and context match
+// 4  TestTrace_ReplacesAnUnsafeIncomingTraceID    Trusted ID containing HTML markup     Replaced by a generated UUID
+// 5  TestTrace_ReplacesAnUnsafeIncomingTraceID    Trusted ID containing spaces          Replaced by a generated UUID
+// 6  TestTrace_ReplacesAnUnsafeIncomingTraceID    Trusted ID longer than 64 characters  Replaced by a generated UUID
+// 7  TestTrace_SetsBuildMetadataInContext         Version and Environment configured    Both stored in the gin context
+//
+// =============================================================================
+
 import (
 	"net/http"
 	"net/http/httptest"
@@ -34,9 +56,9 @@ func TestTrace_GeneratesATraceIDWhenNoneProvided(t *testing.T) {
 
 func TestTrace_IncomingTraceIDOnlyWhenTrusted(t *testing.T) {
 	tests := []struct {
-		name  string
-		trust bool
-		want  bool
+		name       string
+		trust      bool
+		wantReused bool
 	}{
 		{"trusted header is reused", true, true},
 		{"untrusted header is replaced", false, false},
@@ -53,32 +75,39 @@ func TestTrace_IncomingTraceIDOnlyWhenTrusted(t *testing.T) {
 			middleware.Trace(middleware.TraceOptions{TrustHeader: tt.trust})(c)
 
 			got := w.Header().Get(middleware.HeaderTraceID)
-			if (got == "incoming-trace-id") != tt.want || logger.GetTraceID(c.Request.Context()) != got {
-				t.Fatalf("trace ID = %q (context %q), reuse incoming = %v", got, logger.GetTraceID(c.Request.Context()), tt.want)
+			if reused := got == "incoming-trace-id"; reused != tt.wantReused {
+				t.Fatalf("response trace ID = %q, incoming ID reused = %v, want %v", got, reused, tt.wantReused)
+			}
+
+			if ctxID := logger.GetTraceID(c.Request.Context()); ctxID != got {
+				t.Fatalf("logger.GetTraceID(request context) = %q, want it to match the response header %q", ctxID, got)
 			}
 		})
 	}
 }
 
 func TestTrace_ReplacesAnUnsafeIncomingTraceID(t *testing.T) {
-	tests := map[string]string{
-		"markup":   `</pre><a href="https://example.invalid">x</a>`,
-		"spaces":   "trace id",
-		"too long": strings.Repeat("a", 65),
+	tests := []struct {
+		name     string
+		incoming string
+	}{
+		{"contains html markup", `</pre><a href="https://example.invalid">x</a>`},
+		{"contains spaces", "trace id"},
+		{"longer than 64 characters", strings.Repeat("a", 65)},
 	}
 
-	for name, incoming := range tests {
-		t.Run(name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 			c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-			c.Request.Header.Set(middleware.HeaderTraceID, incoming)
+			c.Request.Header.Set(middleware.HeaderTraceID, tt.incoming)
 
 			middleware.Trace(middleware.TraceOptions{TrustHeader: true})(c)
 
 			got := w.Header().Get(middleware.HeaderTraceID)
-			if got == incoming {
+			if got == tt.incoming {
 				t.Fatalf("response trace ID = %q, want a generated ID instead of the unsafe incoming one", got)
 			}
 

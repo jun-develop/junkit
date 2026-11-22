@@ -1,7 +1,95 @@
 package sqlfmt
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: sqlfmt_internal_test.go
+// Purpose: Verify SQL value formatting, placeholder binding, query parsing and caller-frame filtering for logs.
+// Type: Unit
+//
+// Test functions: 7
+// Total scenarios: 72
+//
+// #   Test Case                                      Scenario                                    Expected Result
+// 1   TestFormatValue_RendersLiterals                nil                                         NULL
+// 2   TestFormatValue_RendersLiterals                Nil pointer                                 NULL
+// 3   TestFormatValue_RendersLiterals                Non-nil pointer                             Dereferenced value: 'hello'
+// 4   TestFormatValue_RendersLiterals                String                                      Single-quoted: 'hello'
+// 5   TestFormatValue_RendersLiterals                String with a single quote                  Quote doubled: 'O''Brien'
+// 6   TestFormatValue_RendersLiterals                Bool true                                   true
+// 7   TestFormatValue_RendersLiterals                Bool false                                  false
+// 8   TestFormatValue_RendersLiterals                time.Time                                   Quoted RFC3339 timestamp
+// 9   TestFormatValue_RendersLiterals                uuid.UUID                                   Quoted UUID
+// 10  TestFormatValue_RendersLiterals                int                                         42
+// 11  TestFormatValue_RendersLiterals                Negative int64                              -7
+// 12  TestFormatValue_RendersLiterals                float64                                     3.5
+// 13  TestFormatValue_RendersLiterals                Nil slice                                   NULL
+// 14  TestFormatValue_RendersLiterals                Empty non-nil slice                         Empty array: '{}'
+// 15  TestFormatValue_RendersLiterals                String slice with quotes and backslashes    Elements double-quoted and escaped
+// 16  TestFormatValue_RendersLiterals                Slice holding a nil pointer                 '{NULL}'
+// 17  TestFormatValue_RendersLiterals                Nested slices                               Multidimensional array: '{{1,2},{3,4}}'
+// 18  TestFormatValue_RendersLiterals                Int slice                                   Array literal: '{1,2,3}'
+// 19  TestFormatValue_RendersLiterals                Struct (no dedicated case)                  Quoted %v output: '{1}'
+// 20  TestFormatValue_RendersLiterals                Valid pgtype.UUID                           Quoted UUID
+// 21  TestFormatValue_RendersLiterals                Invalid pgtype.UUID                         NULL
+// 22  TestFormatValue_RendersLiterals                Valid pgtype.Text                           'hi'
+// 23  TestFormatValue_RendersLiterals                Invalid pgtype.Text                         NULL
+// 24  TestFormatValue_RendersLiterals                Valid pgtype.Int8                           9
+// 25  TestFormatValue_RendersLiterals                Invalid pgtype.Int8                         NULL
+// 26  TestFormatValue_RendersLiterals                Valid pgtype.Int4                           9
+// 27  TestFormatValue_RendersLiterals                Invalid pgtype.Int4                         NULL
+// 28  TestFormatValue_RendersLiterals                Valid pgtype.Int2                           9
+// 29  TestFormatValue_RendersLiterals                Invalid pgtype.Int2                         NULL
+// 30  TestFormatValue_RendersLiterals                Valid pgtype.Bool                           true
+// 31  TestFormatValue_RendersLiterals                Invalid pgtype.Bool                         NULL
+// 32  TestFormatValue_RendersLiterals                Valid pgtype.Timestamptz                    Quoted RFC3339 timestamp
+// 33  TestFormatValue_RendersLiterals                Invalid pgtype.Timestamptz                  NULL
+// 34  TestFormatValue_RendersLiterals                Valid pgtype.Timestamp                      Quoted '2026-01-15 10:30:00'
+// 35  TestFormatValue_RendersLiterals                Invalid pgtype.Timestamp                    NULL
+// 36  TestFormatValue_RendersLiterals                Valid pgtype.Date                           Quoted '2026-01-15'
+// 37  TestFormatValue_RendersLiterals                Invalid pgtype.Date                         NULL
+// 38  TestBind_ReplacesPlaceholders                  No args                                     SQL unchanged
+// 39  TestBind_ReplacesPlaceholders                  One $1 placeholder                          Replaced with the quoted value
+// 40  TestBind_ReplacesPlaceholders                  Several placeholders                        Each replaced with its value
+// 41  TestBind_ReplacesPlaceholders                  $10 and $1                                  $10 is read as ten, not $1 followed by 0
+// 42  TestBind_ReplacesPlaceholders                  $0                                          Left as-is
+// 43  TestBind_ReplacesPlaceholders                  Placeholder beyond the args                 Left as-is
+// 44  TestBind_ReplacesPlaceholders                  $ not followed by a digit                   Left as-is
+// 45  TestBind_ReplacesPlaceholders                  $N inside a string literal                  Left as-is
+// 46  TestBind_ReplacesPlaceholders                  $N inside a $$ body                         Left as-is
+// 47  TestBind_ReplacesPlaceholders                  $N inside a $tag$ body                      Left as-is
+// 48  TestBind_ReplacesPlaceholders                  Unterminated string literal                 Rest of the SQL copied unchanged
+// 49  TestBind_ReplacesPlaceholders                  Placeholder right after a string literal    Replaced
+// 50  TestGuessName_UsesLeadingKeyword               SELECT                                      Select
+// 51  TestGuessName_UsesLeadingKeyword               Lowercase select                            Select
+// 52  TestGuessName_UsesLeadingKeyword               INSERT                                      Insert
+// 53  TestGuessName_UsesLeadingKeyword               UPDATE                                      Update
+// 54  TestGuessName_UsesLeadingKeyword               DELETE                                      Delete
+// 55  TestGuessName_UsesLeadingKeyword               WITH (CTE)                                  With
+// 56  TestGuessName_UsesLeadingKeyword               Unrecognized keyword                        Query
+// 57  TestGuessName_UsesLeadingKeyword               Empty string                                Query
+// 58  TestParse_ExtractsAnnotation                   sqlc -- name: annotation                    Name and operation from the annotation
+// 59  TestParse_ExtractsAnnotation                   No annotation                               Name guessed from the keyword
+// 60  TestParse_ExtractsAnnotation                   Comments and extra whitespace               Stripped from the SQL
+// 61  TestParse_CacheIsBounded                       Parse more queries than maxCached           Cache stays at most maxCached; later queries still parse
+// 62  TestBindQuestion_ReplacesPlaceholders          No args                                     SQL unchanged
+// 63  TestBindQuestion_ReplacesPlaceholders          Several ? placeholders                      Replaced in order
+// 64  TestBindQuestion_ReplacesPlaceholders          ? inside a string literal                   Left as-is
+// 65  TestBindQuestion_ReplacesPlaceholders          Placeholders beyond the args                Left as-is
+// 66  TestIsOriginSkipped_SkipsNonApplicationFrames  Runtime frame                               Skipped
+// 67  TestIsOriginSkipped_SkipsNonApplicationFrames  Frame in a *.sql.go (sqlc) file             Skipped
+// 68  TestIsOriginSkipped_SkipsNonApplicationFrames  pgx driver frame                            Skipped
+// 69  TestIsOriginSkipped_SkipsNonApplicationFrames  junkit database/postgres frame              Skipped
+// 70  TestIsOriginSkipped_SkipsNonApplicationFrames  junkit tracer frame                         Skipped
+// 71  TestIsOriginSkipped_SkipsNonApplicationFrames  Application frame                           Not skipped
+// 72  TestIsOriginSkipped_SkipsNonApplicationFrames  Package databasex (prefix without the dot)  Not skipped
+//
+// =============================================================================
+
 import (
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 
@@ -415,6 +503,30 @@ func TestBindQuestion_ReplacesPlaceholders(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := BindQuestion(tt.sql, tt.args); got != tt.want {
 				t.Fatalf("BindQuestion() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsOriginSkipped_SkipsNonApplicationFrames(t *testing.T) {
+	tests := []struct {
+		name  string
+		frame runtime.Frame
+		want  bool
+	}{
+		{"runtime frame", runtime.Frame{Function: "runtime.goexit", File: "/go/src/runtime/asm.s"}, true},
+		{"sqlc-generated file", runtime.Frame{Function: "example.com/app/db.(*Queries).GetUser", File: "/app/db/users.sql.go"}, true},
+		{"pgx driver frame", runtime.Frame{Function: "github.com/jackc/pgx/v5.(*Conn).Query", File: "/mod/pgx/conn.go"}, true},
+		{"junkit postgres wrapper", runtime.Frame{Function: "github.com/jun-develop/junkit/database/postgres.(*DB).Query", File: "/mod/junkit/database/postgres/postgres.go"}, true},
+		{"junkit tracer wrapper", runtime.Frame{Function: "github.com/jun-develop/junkit/tracer.(*PgxWrapper).Exec", File: "/mod/junkit/tracer/db.go"}, true},
+		{"application code", runtime.Frame{Function: "example.com/app/user.(*Repository).Get", File: "/app/user/repository.go"}, false},
+		{"application package named like a junkit prefix", runtime.Frame{Function: "github.com/jun-develop/junkit/databasex.Run", File: "/app/x.go"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isOriginSkipped(tt.frame); got != tt.want {
+				t.Errorf("isOriginSkipped(%s) = %v, want %v", tt.frame.Function, got, tt.want)
 			}
 		})
 	}

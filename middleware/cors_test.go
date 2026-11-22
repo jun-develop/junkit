@@ -1,5 +1,29 @@
 package middleware_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: cors_test.go
+// Purpose: Verify the CORS middleware headers, preflight handling and invalid configuration.
+// Type: Unit
+//
+// Test functions: 8
+// Total scenarios: 9
+//
+// #  Test Case                                       Scenario                                 Expected Result
+// 1  TestCORS_EchoesAllowedOrigin                    Origin is in AllowOrigins                Origin echoed, Vary: Origin, allowed methods listed
+// 2  TestCORS_OmitsHeaderForDisallowedOrigin         Origin not in AllowOrigins               No Access-Control-Allow-Origin header
+// 3  TestCORS_AllowsAnyOriginWithWildcard            AllowOrigins "*" without credentials     Access-Control-Allow-Origin is "*"
+// 4  TestCORS_PanicsOnWildcardWithCredentials        AllowOrigins "*" with AllowCredentials   CORS panics at setup
+// 5  TestCORS_OmitsHeaderWithoutOriginHeader         Request without an Origin header         No Access-Control-Allow-Origin header
+// 6  TestCORS_PreflightIsAborted                     OPTIONS preflight                        204 and the chain is aborted
+// 7  TestCORS_NonPreflightContinuesTheChain          Normal GET                               Chain is not aborted
+// 8  TestCORS_VaryOriginOnDisallowedOrMissingOrigin  Disallowed origin, existing Vary header  Vary is [Accept-Encoding Origin]
+// 9  TestCORS_VaryOriginOnDisallowedOrMissingOrigin  No Origin header, existing Vary header   Vary is [Accept-Encoding Origin]
+//
+// =============================================================================
+
 import (
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +34,7 @@ import (
 	"github.com/jun-develop/junkit/middleware"
 )
 
+// newCORSContext returns a test context for a request to "/" with the given Origin (none if empty).
 func newCORSContext(method, origin string) (*httptest.ResponseRecorder, *gin.Context) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
@@ -22,7 +47,7 @@ func newCORSContext(method, origin string) (*httptest.ResponseRecorder, *gin.Con
 	return w, c
 }
 
-func TestCORS_AllowedSpecificOrigin(t *testing.T) {
+func TestCORS_EchoesAllowedOrigin(t *testing.T) {
 	opts := middleware.CORSOptions{
 		AllowOrigins: []string{"https://app.example.com"},
 		AllowMethods: []string{"GET", "POST"},
@@ -45,7 +70,7 @@ func TestCORS_AllowedSpecificOrigin(t *testing.T) {
 	}
 }
 
-func TestCORS_DisallowedOrigin(t *testing.T) {
+func TestCORS_OmitsHeaderForDisallowedOrigin(t *testing.T) {
 	opts := middleware.CORSOptions{AllowOrigins: []string{"https://app.example.com"}}
 	w, c := newCORSContext(http.MethodGet, "https://evil.example.com")
 
@@ -56,7 +81,7 @@ func TestCORS_DisallowedOrigin(t *testing.T) {
 	}
 }
 
-func TestCORS_WildcardWithoutCredentials(t *testing.T) {
+func TestCORS_AllowsAnyOriginWithWildcard(t *testing.T) {
 	opts := middleware.CORSOptions{AllowOrigins: []string{"*"}}
 	w, c := newCORSContext(http.MethodGet, "https://anywhere.example.com")
 
@@ -67,17 +92,17 @@ func TestCORS_WildcardWithoutCredentials(t *testing.T) {
 	}
 }
 
-func TestCORS_WildcardWithCredentialsPanics(t *testing.T) {
+func TestCORS_PanicsOnWildcardWithCredentials(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Error("CORS did not panic for AllowOrigins \"*\" with AllowCredentials")
+			t.Error("CORS() did not panic for AllowOrigins \"*\" with AllowCredentials")
 		}
 	}()
 
 	middleware.CORS(middleware.CORSOptions{AllowOrigins: []string{"*"}, AllowCredentials: true})
 }
 
-func TestCORS_NoOriginHeader(t *testing.T) {
+func TestCORS_OmitsHeaderWithoutOriginHeader(t *testing.T) {
 	opts := middleware.CORSOptions{AllowOrigins: []string{"https://app.example.com"}}
 	w, c := newCORSContext(http.MethodGet, "")
 
@@ -99,32 +124,40 @@ func TestCORS_PreflightIsAborted(t *testing.T) {
 	}
 
 	if !c.IsAborted() {
-		t.Error("a preflight OPTIONS request should abort the chain")
+		t.Error("chain not aborted, want a preflight OPTIONS request to abort it")
 	}
 }
 
 func TestCORS_NonPreflightContinuesTheChain(t *testing.T) {
 	opts := middleware.CORSOptions{AllowOrigins: []string{"*"}}
-	w, c := newCORSContext(http.MethodGet, "https://app.example.com")
+	_, c := newCORSContext(http.MethodGet, "https://app.example.com")
 
 	middleware.CORS(opts)(c)
 
 	if c.IsAborted() {
-		t.Error("a normal GET request should not abort the chain")
+		t.Error("chain aborted, want a normal GET request to continue")
 	}
-
-	_ = w
 }
 
 func TestCORS_VaryOriginOnDisallowedOrMissingOrigin(t *testing.T) {
-	for _, origin := range []string{"https://evil.example.com", ""} {
-		w, c := newCORSContext(http.MethodGet, origin)
-		c.Writer.Header().Add("Vary", "Accept-Encoding")
+	tests := []struct {
+		name   string
+		origin string
+	}{
+		{"disallowed origin", "https://evil.example.com"},
+		{"no origin header", ""},
+	}
 
-		middleware.CORS(middleware.CORSOptions{AllowOrigins: []string{"https://app.example.com"}})(c)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w, c := newCORSContext(http.MethodGet, tt.origin)
+			c.Writer.Header().Add("Vary", "Accept-Encoding")
 
-		if got := w.Header().Values("Vary"); len(got) != 2 || got[1] != "Origin" {
-			t.Errorf("origin %q: Vary = %v, want [Accept-Encoding Origin]", origin, got)
-		}
+			middleware.CORS(middleware.CORSOptions{AllowOrigins: []string{"https://app.example.com"}})(c)
+
+			if got := w.Header().Values("Vary"); len(got) != 2 || got[1] != "Origin" {
+				t.Errorf("Vary = %v, want [Accept-Encoding Origin]", got)
+			}
+		})
 	}
 }

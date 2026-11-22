@@ -3,3 +3,4 @@
 .DS_Store
 .codegraph
 /validation/storage/bootstrap/email_blocklist.conf
+test.json

@@ -1,5 +1,29 @@
 package tracer_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: db_test.go
+// Purpose: Verify that the pgx tracing wrapper and BeginQuery record SQL entries on the Debugger.
+// Type: Unit (pgx is replaced by the in-memory fakeDB / fakeRows below)
+//
+// Test functions: 5
+// Total scenarios: 9
+//
+// #  Test Case                                    Scenario                                Expected Result
+// 1  TestPgxWrapper_PassesThroughWithoutDebugger  Query without a Debugger                Returns the inner rows unwrapped
+// 2  TestPgxWrapper_ExecRecordsStatement          Annotated UPDATE with one argument      One TouchUsers entry with bound SQL, EXEC operation, 3 rows affected
+// 3  TestPgxWrapper_QueryRecordsRowsOnceOnClose   Two rows read, Close called twice       One entry, RowCount 2, JSON bytes kept as JSON and others as hex
+// 4  TestPgxWrapper_QueryRowRecordsResult         One row scanned                         Entry has the scanned row and the bound SQL
+// 5  TestPgxWrapper_QueryRowRecordsResult         No rows                                 Scan returns pgx.ErrNoRows; entry records it
+// 6  TestPgxWrapper_QueryRowRecordsResult         Query fails                             Scan returns the error; entry records it with this test as origin
+// 7  TestPgxWrapper_QueryRowRecordsResult         Successful query                        Entry has no origin location
+// 8  TestBeginQuery_SupportsNonPgxBind            No Debugger                             Returns nil
+// 9  TestBeginQuery_SupportsNonPgxBind            ? placeholder with sqlfmt.BindQuestion  One GetUser entry with the placeholder bound
+//
+// =============================================================================
+
 import (
 	"context"
 	"encoding/json"
@@ -111,13 +135,23 @@ func sqlEntries(t *testing.T, d *tracer.Debugger) []tracer.LogEntry {
 	return logs
 }
 
-// TestPgxWrapper_PassesThroughWithoutDebugger checks untraced pass-through without a Debugger.
+// onlySQLData fails unless d holds exactly one SQL entry, and returns that entry's data.
+func onlySQLData(t *testing.T, d *tracer.Debugger) tracer.SQLData {
+	t.Helper()
+	logs := sqlEntries(t, d)
+	if len(logs) != 1 {
+		t.Fatalf("got %d SQL entries, want 1", len(logs))
+	}
+
+	return logs[0].Data.(tracer.SQLData)
+}
+
 func TestPgxWrapper_PassesThroughWithoutDebugger(t *testing.T) {
 	db := tracer.NewPgxWrapper(&fakeDB{cols: []string{"id"}, rows: [][]any{{1}}})
 
 	rows, err := db.Query(context.Background(), "SELECT id FROM users")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Query() error = %v", err)
 	}
 
 	if _, traced := rows.(*fakeRows); !traced {
@@ -125,13 +159,12 @@ func TestPgxWrapper_PassesThroughWithoutDebugger(t *testing.T) {
 	}
 }
 
-// TestPgxWrapper_Exec checks Exec records the statement and rows affected.
-func TestPgxWrapper_Exec(t *testing.T) {
+func TestPgxWrapper_ExecRecordsStatement(t *testing.T) {
 	ctx, d := newCtx()
 	db := tracer.NewPgxWrapper(&fakeDB{})
 
 	if _, err := db.Exec(ctx, "-- name: TouchUsers :exec\nUPDATE users SET seen = $1", true); err != nil {
-		t.Fatal(err)
+		t.Fatalf("Exec() error = %v", err)
 	}
 
 	logs := sqlEntries(t, d)
@@ -140,8 +173,12 @@ func TestPgxWrapper_Exec(t *testing.T) {
 	}
 
 	data := logs[0].Data.(tracer.SQLData)
-	if data.SQL != "UPDATE users SET seen = true" || data.Operation != "EXEC" {
-		t.Errorf("SQLData = %+v, want the bound SQL and the EXEC operation", data)
+	if data.SQL != "UPDATE users SET seen = true" {
+		t.Errorf("SQL = %q, want the bound SQL %q", data.SQL, "UPDATE users SET seen = true")
+	}
+
+	if data.Operation != "EXEC" {
+		t.Errorf("Operation = %q, want %q", data.Operation, "EXEC")
 	}
 
 	if data.RowsAffected == nil || *data.RowsAffected != 3 {
@@ -149,7 +186,6 @@ func TestPgxWrapper_Exec(t *testing.T) {
 	}
 }
 
-// TestPgxWrapper_QueryRecordsRowsOnceOnClose checks rows are recorded once, on Close.
 func TestPgxWrapper_QueryRecordsRowsOnceOnClose(t *testing.T) {
 	ctx, d := newCtx()
 	db := tracer.NewPgxWrapper(&fakeDB{
@@ -159,14 +195,14 @@ func TestPgxWrapper_QueryRecordsRowsOnceOnClose(t *testing.T) {
 
 	rows, err := db.Query(ctx, "SELECT id, meta FROM users")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Query() error = %v", err)
 	}
 
 	for rows.Next() {
 		var id int
 		var meta []byte
 		if err := rows.Scan(&id, &meta); err != nil {
-			t.Fatal(err)
+			t.Fatalf("Scan() error = %v", err)
 		}
 	}
 
@@ -184,24 +220,27 @@ func TestPgxWrapper_QueryRecordsRowsOnceOnClose(t *testing.T) {
 		t.Fatalf("RowCount = %v, want 2", data.RowCount)
 	}
 
-	got, _ := json.Marshal(data.Rows)
+	got, err := json.Marshal(data.Rows)
+	if err != nil {
+		t.Fatalf("json.Marshal(Rows) error = %v", err)
+	}
+
 	if want := `[{"id":1,"meta":{"a":1}},{"id":2,"meta":"dead"}]`; string(got) != want {
 		t.Errorf("Rows = %s, want %s (JSON bytes kept as JSON, others as hex)", got, want)
 	}
 }
 
-// TestPgxWrapper_QueryRow checks QueryRow records the row it scans.
-func TestPgxWrapper_QueryRow(t *testing.T) {
+func TestPgxWrapper_QueryRowRecordsResult(t *testing.T) {
 	t.Run("records the scanned row", func(t *testing.T) {
 		ctx, d := newCtx()
 		db := tracer.NewPgxWrapper(&fakeDB{cols: []string{"email"}, rows: [][]any{{"jane@example.com"}}})
 
 		var email string
 		if err := db.QueryRow(ctx, "SELECT email FROM users WHERE id = $1", 7).Scan(&email); err != nil {
-			t.Fatal(err)
+			t.Fatalf("Scan() error = %v", err)
 		}
 
-		data := sqlEntries(t, d)[0].Data.(tracer.SQLData)
+		data := onlySQLData(t, d)
 		if data.Result["email"] != "jane@example.com" {
 			t.Errorf("Result = %v, want the scanned email", data.Result)
 		}
@@ -220,7 +259,7 @@ func TestPgxWrapper_QueryRow(t *testing.T) {
 			t.Fatalf("Scan error = %v, want pgx.ErrNoRows", err)
 		}
 
-		if data := sqlEntries(t, d)[0].Data.(tracer.SQLData); data.Error != pgx.ErrNoRows.Error() {
+		if data := onlySQLData(t, d); data.Error != pgx.ErrNoRows.Error() {
 			t.Errorf("Error = %q, want %q", data.Error, pgx.ErrNoRows.Error())
 		}
 	})
@@ -234,14 +273,18 @@ func TestPgxWrapper_QueryRow(t *testing.T) {
 			t.Fatalf("Scan error = %v, want %v", err, boom)
 		}
 
-		data := sqlEntries(t, d)[0].Data.(tracer.SQLData)
+		data := onlySQLData(t, d)
 		if data.Error != boom.Error() {
 			t.Errorf("Error = %q, want %q", data.Error, boom.Error())
 		}
 
 		// The origin is the code that ran the query, not the tracer wrapper.
-		if !strings.Contains(data.Location, "db_test.go:") || !strings.Contains(data.Function, "TestPgxWrapper_QueryRow") {
-			t.Errorf("Location, Function = %q, %q, want this test", data.Location, data.Function)
+		if !strings.Contains(data.Location, "db_test.go:") {
+			t.Errorf("Location = %q, want this test file (db_test.go)", data.Location)
+		}
+
+		if !strings.Contains(data.Function, "TestPgxWrapper_QueryRowRecordsResult") {
+			t.Errorf("Function = %q, want this test function", data.Function)
 		}
 	})
 
@@ -250,30 +293,36 @@ func TestPgxWrapper_QueryRow(t *testing.T) {
 		db := tracer.NewPgxWrapper(&fakeDB{cols: []string{"email"}, rows: [][]any{{"a@b.c"}}})
 
 		var email string
-		_ = db.QueryRow(ctx, "SELECT email FROM users").Scan(&email)
+		if err := db.QueryRow(ctx, "SELECT email FROM users").Scan(&email); err != nil {
+			t.Fatalf("Scan() error = %v", err)
+		}
 
-		if data := sqlEntries(t, d)[0].Data.(tracer.SQLData); data.Location != "" {
+		if data := onlySQLData(t, d); data.Location != "" {
 			t.Errorf("Location = %q, want empty for a successful query", data.Location)
 		}
 	})
 }
 
-// TestBeginQuery_DriverIndependent checks BeginQuery with a non-pgx bind func.
-func TestBeginQuery_DriverIndependent(t *testing.T) {
-	if q := tracer.BeginQuery(context.Background(), "SELECT 1", nil, sqlfmt.Bind); q != nil {
-		t.Fatal("BeginQuery() without a Debugger returned a query, want nil")
-	}
+func TestBeginQuery_SupportsNonPgxBind(t *testing.T) {
+	t.Run("no debugger", func(t *testing.T) {
+		if q := tracer.BeginQuery(context.Background(), "SELECT 1", nil, sqlfmt.Bind); q != nil {
+			t.Errorf("BeginQuery() = %v, want nil", q)
+		}
+	})
 
-	ctx, d := newCtx()
-	q := tracer.BeginQuery(ctx, "-- name: GetUser :one\nSELECT email FROM users WHERE id = ?", []any{7}, sqlfmt.BindQuestion)
-	q.Finish(tracer.SQLData{}, nil)
+	t.Run("question-mark placeholder with sqlfmt.BindQuestion", func(t *testing.T) {
+		ctx, d := newCtx()
 
-	logs := sqlEntries(t, d)
-	if len(logs) != 1 || logs[0].Label != "GetUser" {
-		t.Fatalf("Logs() = %+v, want one GetUser entry", logs)
-	}
+		q := tracer.BeginQuery(ctx, "-- name: GetUser :one\nSELECT email FROM users WHERE id = ?", []any{7}, sqlfmt.BindQuestion)
+		q.Finish(tracer.SQLData{}, nil)
 
-	if data := logs[0].Data.(tracer.SQLData); data.SQL != "SELECT email FROM users WHERE id = 7" {
-		t.Errorf("SQL = %q, want the ? placeholder bound", data.SQL)
-	}
+		logs := sqlEntries(t, d)
+		if len(logs) != 1 || logs[0].Label != "GetUser" {
+			t.Fatalf("Logs() = %+v, want one GetUser entry", logs)
+		}
+
+		if data := logs[0].Data.(tracer.SQLData); data.SQL != "SELECT email FROM users WHERE id = 7" {
+			t.Errorf("SQL = %q, want the ? placeholder bound", data.SQL)
+		}
+	})
 }

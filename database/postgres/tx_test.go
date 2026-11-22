@@ -1,5 +1,30 @@
 package postgres_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: tx_test.go
+// Purpose: Verify DB.Executor (pool vs. active transaction) and DB.WithTransaction
+//          (begin, commit, rollback, panic, nesting), using a fake pool and transaction.
+// Type: Unit
+//
+// Test functions: 2
+// Total scenarios: 9
+//
+// #  Test Case                                   Scenario                                  Expected Result
+// 1  TestDB_ExecutorReturnsPoolOrOwnTransaction  Outside a transaction                     Returns the pool
+// 2  TestDB_ExecutorReturnsPoolOrOwnTransaction  Inside a transaction begun on another DB  Returns its own pool, not the other DB's transaction
+// 3  TestDB_WithTransactionCommitsOrRollsBack    fn succeeds                               Commits; no rollback
+// 4  TestDB_WithTransactionCommitsOrRollsBack    fn returns an error                       Returns that error; rolls back; no commit
+// 5  TestDB_WithTransactionCommitsOrRollsBack    fn panics                                 Rolls back, no commit, re-panics with the same value
+// 6  TestDB_WithTransactionCommitsOrRollsBack    Begin fails                               Returns the Begin error; fn is not run
+// 7  TestDB_WithTransactionCommitsOrRollsBack    Commit fails                              Returns an error wrapping the commit error
+// 8  TestDB_WithTransactionCommitsOrRollsBack    Nested WithTransaction call               Joins the outer transaction; only the outer call commits
+// 9  TestDB_WithTransactionCommitsOrRollsBack    Executor inside fn                        Returns the active transaction
+//
+// =============================================================================
+
 import (
 	"context"
 	"errors"
@@ -46,7 +71,7 @@ func (f *fakePool) Begin(context.Context) (pgx.Tx, error) {
 	return f.tx, nil
 }
 
-func TestDB_ExecutorPicksPoolOrTx(t *testing.T) {
+func TestDB_ExecutorReturnsPoolOrOwnTransaction(t *testing.T) {
 	t.Run("returns the pool outside a transaction", func(t *testing.T) {
 		pool := &fakePool{}
 		db := postgres.FromPool(pool)
@@ -69,7 +94,7 @@ func TestDB_ExecutorPicksPoolOrTx(t *testing.T) {
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Fatalf("WithTransaction() error = %v, want nil", err)
 		}
 	})
 }
@@ -88,11 +113,11 @@ func TestDB_WithTransactionCommitsOrRollsBack(t *testing.T) {
 		}
 
 		if !tx.committed {
-			t.Fatal("expected the transaction to be committed")
+			t.Fatal("transaction committed = false, want true")
 		}
 
 		if tx.rolledBack {
-			t.Fatal("did not expect a rollback on success")
+			t.Fatal("transaction rolled back = true, want false on success")
 		}
 	})
 
@@ -110,11 +135,11 @@ func TestDB_WithTransactionCommitsOrRollsBack(t *testing.T) {
 		}
 
 		if tx.committed {
-			t.Fatal("did not expect a commit when fn returned an error")
+			t.Fatal("transaction committed = true, want false when fn returns an error")
 		}
 
 		if !tx.rolledBack {
-			t.Fatal("expected a rollback when fn returned an error")
+			t.Fatal("transaction rolled back = false, want true when fn returns an error")
 		}
 	})
 
@@ -129,11 +154,11 @@ func TestDB_WithTransactionCommitsOrRollsBack(t *testing.T) {
 			}
 
 			if !tx.rolledBack {
-				t.Fatal("expected a rollback after a panic")
+				t.Fatal("transaction rolled back = false, want true after a panic")
 			}
 
 			if tx.committed {
-				t.Fatal("did not expect a commit after a panic")
+				t.Fatal("transaction committed = true, want false after a panic")
 			}
 		}()
 
@@ -195,7 +220,7 @@ func TestDB_WithTransactionCommitsOrRollsBack(t *testing.T) {
 		}
 
 		if !tx.committed {
-			t.Fatal("expected the outer transaction to be committed")
+			t.Fatal("outer transaction committed = false, want true")
 		}
 	})
 
@@ -211,7 +236,7 @@ func TestDB_WithTransactionCommitsOrRollsBack(t *testing.T) {
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Fatalf("WithTransaction() error = %v, want nil", err)
 		}
 	})
 }

@@ -1,5 +1,27 @@
 package middleware_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: recover_test.go
+// Purpose: Verify the Recover middleware turns panics into 500 responses and error reports.
+// Type: Unit
+//
+// Test functions: 7
+// Total scenarios: 7
+//
+// #  Test Case                                    Scenario                                          Expected Result
+// 1  TestRecover_NoPanicPassesThrough             Handler returns 200 normally                      200
+// 2  TestRecover_PanicIsCaughtAndReported         Handler panics with a string                      500 and one error report with status 500 and the panic message
+// 3  TestRecover_NilNotifierIsSafe                Handler panics, notifier is nil                   500, no crash
+// 4  TestRecover_BreakpointSignalIsRePanicked     Handler panics with tracer.BreakpointSignal       Signal re-panicked unchanged, no error report
+// 5  TestRecover_DebugBypassRoutesThroughTracer   Panic on a debug request with the secret header   No response written, no error report
+// 6  TestRecover_DebugWithoutSecretNeverBypasses  Panic on a debug query without the secret header  500 and one error report (normal path)
+// 7  TestRecover_ReportsThePanicSite              Handler panics on a known line                    Report location is recover_test.go at the panic line
+//
+// =============================================================================
+
 import (
 	"net/http"
 	"net/http/httptest"
@@ -10,18 +32,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
-	"github.com/jun-develop/junkit/i18n"
 	"github.com/jun-develop/junkit/middleware"
 	"github.com/jun-develop/junkit/notification"
-	"github.com/jun-develop/junkit/response"
 	"github.com/jun-develop/junkit/tracer"
 )
 
-func newResponder() response.Responder {
-	return response.NewResponder(i18n.NewTranslator())
-}
-
-// newRecoverRouter sets up a Gin router with Recover middleware for testing.
+// newRecoverRouter returns a router with Recover and a GET / route served by handler.
 func newRecoverRouter(notifier notification.Notifier, opts middleware.RecoverOptions, handler gin.HandlerFunc) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -98,7 +114,7 @@ func TestRecover_BreakpointSignalIsRePanicked(t *testing.T) {
 		}
 
 		if len(notifier.errorReports()) != 0 {
-			t.Error("a BreakpointSignal is not a real error and should not trigger a notification")
+			t.Error("got an error notification, want none: a BreakpointSignal is not a real error")
 		}
 	}()
 
@@ -120,8 +136,12 @@ func TestRecover_DebugBypassRoutesThroughTracer(t *testing.T) {
 		t.Fatalf("status = %d, want no response written on the debug bypass path", w.Code)
 	}
 
+	if w.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty on the debug bypass path", w.Body)
+	}
+
 	if len(notifier.errorReports()) != 0 {
-		t.Error("the debug bypass path should not send an error notification")
+		t.Error("got an error notification, want none on the debug bypass path")
 	}
 }
 
@@ -136,7 +156,7 @@ func TestRecover_DebugWithoutSecretNeverBypasses(t *testing.T) {
 	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/?t_debug=1234", nil))
 
 	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d — a debug query without the secret must never bypass the normal error path",
+		t.Fatalf("status = %d, want %d: a debug query without the secret must never bypass the normal error path",
 			w.Code, http.StatusInternalServerError)
 	}
 
@@ -155,8 +175,16 @@ func TestRecover_ReportsThePanicSite(t *testing.T) {
 
 	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 
-	report := notifier.errorReports()[0]
-	if !strings.HasSuffix(report.Location, "recover_test.go") || report.Line != panicLine+1 {
-		t.Fatalf("location = %v:%v, want recover_test.go:%d (the panic site, not Recover's handler)", report.Location, report.Line, panicLine+1)
+	reports := notifier.errorReports()
+	if len(reports) != 1 {
+		t.Fatalf("got %d error notifications, want 1", len(reports))
+	}
+
+	if !strings.HasSuffix(reports[0].Location, "recover_test.go") {
+		t.Errorf("location = %v, want recover_test.go (the panic site, not Recover's handler)", reports[0].Location)
+	}
+
+	if reports[0].Line != panicLine+1 {
+		t.Errorf("line = %d, want %d (the panic line)", reports[0].Line, panicLine+1)
 	}
 }

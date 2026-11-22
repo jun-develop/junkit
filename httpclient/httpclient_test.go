@@ -1,5 +1,34 @@
 package httpclient_test
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: httpclient_test.go
+// Purpose: Verify client defaults, retry behavior against a local test server, and the fx module.
+// Type: Unit (uses httptest servers)
+//
+// Test functions: 11
+// Total scenarios: 14
+//
+// #   Test Case                                        Scenario                          Expected Result
+// 1   TestNewClient_AppliesDefaults                    Empty Options                     15s timeout, plain transport, 100 idle conns, 20 per host
+// 2   TestNewClient_RespectsExplicitOptions            Timeout set to 3s                 Client timeout is 3s
+// 3   TestNewDefaultClient_UsesDefaultsWithoutRetries  No arguments                      15s timeout, plain transport (no retries)
+// 4   TestClient_RetriesOnServerErrorThenSucceeds      Two 503s, then 200                Returns 200 after 3 attempts
+// 5   TestClient_GivesUpAfterMaxRetries                Always 500, MaxRetries 2          Returns the last 500 after 3 attempts
+// 6   TestClient_DoesNotRetryOnOrdinaryClientError     Server returns 400                Exactly 1 attempt
+// 7   TestClient_RetriesOnTooManyRequests              One 429, then 200                 Returns 200
+// 8   TestClient_RequestBodyIsReplayedAcrossRetries    PUT with a body, two 503s         Every attempt receives the full body
+// 9   TestClient_StopsRetryingWhenContextIsCanceled    Context times out during backoff  Returns an error promptly
+// 10  TestClient_RetriesOnlyReplayableRequests         GET                               Retried: 3 attempts
+// 11  TestClient_RetriesOnlyReplayableRequests         POST                              Not retried: 1 attempt
+// 12  TestClient_RetriesOnlyReplayableRequests         POST with Idempotency-Key         Retried: 3 attempts
+// 13  TestClient_RetriesOnlyReplayableRequests         PUT with a non-replayable body    Not retried: 1 attempt; request left untouched
+// 14  TestModule_ProvidesClientAndStopsCleanly         fx app start and stop             Provides an *http.Client; stop hook runs without error
+//
+// =============================================================================
+
 import (
 	"context"
 	"io"
@@ -43,7 +72,7 @@ func TestNewClient_RespectsExplicitOptions(t *testing.T) {
 	}
 }
 
-func TestNewDefaultClient(t *testing.T) {
+func TestNewDefaultClient_UsesDefaultsWithoutRetries(t *testing.T) {
 	client := httpclient.NewDefaultClient()
 	if client.Timeout != 15*time.Second {
 		t.Fatalf("Timeout = %v, want the documented default of 15s", client.Timeout)
@@ -148,7 +177,7 @@ func TestClient_DoesNotRetryOnOrdinaryClientError(t *testing.T) {
 	}
 }
 
-func TestClient_RetriesOn429(t *testing.T) {
+func TestClient_RetriesOnTooManyRequests(t *testing.T) {
 	var attempts int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&attempts, 1) == 1 {
@@ -183,7 +212,12 @@ func TestClient_RequestBodyIsReplayedAcrossRetries(t *testing.T) {
 	var attempts int32
 	var receivedBodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
 		receivedBodies = append(receivedBodies, string(body))
 
 		if atomic.AddInt32(&attempts, 1) <= 2 {
@@ -204,7 +238,7 @@ func TestClient_RequestBodyIsReplayedAcrossRetries(t *testing.T) {
 
 	req, err := http.NewRequest(http.MethodPut, server.URL, strings.NewReader("request payload"))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("NewRequest() error = %v", err)
 	}
 
 	resp, err := client.Do(req)
@@ -225,7 +259,7 @@ func TestClient_RequestBodyIsReplayedAcrossRetries(t *testing.T) {
 	}
 }
 
-func TestClient_RetryStopsOnContextCancellation(t *testing.T) {
+func TestClient_StopsRetryingWhenContextIsCanceled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
@@ -251,7 +285,7 @@ func TestClient_RetryStopsOnContextCancellation(t *testing.T) {
 	elapsed := time.Since(start)
 
 	if err == nil {
-		t.Fatal("expected an error once the context deadline is exceeded")
+		t.Fatal("Do() error = nil, want an error once the context deadline is exceeded")
 	}
 
 	if elapsed > 2*time.Second {
@@ -270,11 +304,11 @@ func TestClient_RetriesOnlyReplayableRequests(t *testing.T) {
 		idempotency  bool
 		wantAttempts int32
 	}{
-		{"GET retried", http.MethodGet, nil, false, 3},
-		{"POST not retried", http.MethodPost, func() io.Reader { return strings.NewReader("x") }, false, 1},
-		{"POST with Idempotency-Key retried", http.MethodPost,
+		{"GET is retried", http.MethodGet, nil, false, 3},
+		{"POST is not retried", http.MethodPost, func() io.Reader { return strings.NewReader("x") }, false, 1},
+		{"POST with Idempotency-Key is retried", http.MethodPost,
 			func() io.Reader { return strings.NewReader("x") }, true, 3},
-		{"PUT with non-replayable body not retried", http.MethodPut,
+		{"PUT with a non-replayable body is not retried", http.MethodPut,
 			func() io.Reader { return opaqueReader{strings.NewReader("x")} }, false, 1},
 	}
 	for _, tt := range tests {
@@ -299,7 +333,7 @@ func TestClient_RetriesOnlyReplayableRequests(t *testing.T) {
 
 			req, err := http.NewRequest(tt.method, server.URL, body)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("NewRequest() error = %v", err)
 			}
 
 			if tt.idempotency {
@@ -319,13 +353,13 @@ func TestClient_RetriesOnlyReplayableRequests(t *testing.T) {
 			}
 
 			if (getBody == nil) != (req.GetBody == nil) {
-				t.Fatal("RoundTrip must not modify the caller's request")
+				t.Fatal("req.GetBody changed after Do(), want RoundTrip to leave the caller's request untouched")
 			}
 		})
 	}
 }
 
-func TestModule_ClosesIdleConnectionsOnStop(t *testing.T) {
+func TestModule_ProvidesClientAndStopsCleanly(t *testing.T) {
 	var client *http.Client
 	app := fxtest.New(t,
 		fx.Supply(httpclient.Options{}),
