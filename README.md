@@ -49,18 +49,19 @@ Part III collects recipes that combine several packages.
 24. [`upload`](#24-upload) — check an uploaded file before storing it
 25. [`apidoc`](#25-apidoc) — OpenAPI 3 document + Scalar UI
 26. [`slicex`](#26-slicex) — slice helpers
+27. [`stringx`](#27-stringx) — case conversion helpers
 
 **Part III — Recipes**
 
-27. [Full Fx wiring](#27-full-fx-wiring)
-28. [Recommended middleware chain](#28-recommended-middleware-chain)
-29. [Repository + transaction + error mapping](#29-repository--transaction--error-mapping)
-30. [Bearer-token authentication](#30-bearer-token-authentication)
-31. [Debugging a request with `tracer`](#31-debugging-a-request-with-tracer)
+28. [Full Fx wiring](#28-full-fx-wiring)
+29. [Recommended middleware chain](#29-recommended-middleware-chain)
+30. [Repository + transaction + error mapping](#30-repository--transaction--error-mapping)
+31. [Bearer-token authentication](#31-bearer-token-authentication)
+32. [Debugging a request with `tracer`](#32-debugging-a-request-with-tracer)
 
 **Part IV — Contributing**
 
-32. [Development](#32-development)
+33. [Development](#33-development)
 
 ---
 
@@ -117,6 +118,7 @@ Exceptions:
 | `sqlfmt` | Pure helpers shared by `database/postgres` and `tracer` |
 | `upload` | Pure checks on a `*multipart.FileHeader` |
 | `slicex` | Generic slice helpers |
+| `stringx` | String case-conversion helpers |
 | `apidoc` | Builds a document from values you pass at startup; `Register` mounts it on a router |
 | `middleware` | Call sites need *differently configured* instances (e.g. a stricter `Limiter` for one route group), so you call the constructors where routes are registered |
 | `tracer` | Context-based — activated per request by `middleware.TracerDebug` |
@@ -273,6 +275,7 @@ run `go doc -all github.com/jun-develop/junkit/<package>` for the complete API.
 | [`upload`](#24-upload) | Checks an uploaded file's size, extension and sniffed content type before it is stored | — | functions |
 | [`apidoc`](#25-apidoc) | OpenAPI 3 document from your request/response structs (`json`/`form`, `binding`, `example` tags) and `apidoc.Route` descriptions; `Register` serves it with Scalar | — | functions |
 | [`slicex`](#26-slicex) | Slice helpers the standard `slices` package lacks: `Map(s, fn)` (empty input → `[]`, so JSON lists never render as `null`) | — | functions |
+| [`stringx`](#27-stringx) | Case conversion the standard `strings` package lacks: `ToSnake`, `ToPascal`, `ToCamel`, `UpperFirst`, `LowerFirst` | — | functions |
 
 **Dependency graph** (what each `Module` needs injected):
 
@@ -1036,7 +1039,7 @@ err = hasher.CompareDummy(ctx, plain)       // call when the user does NOT exist
 The identity lives in the request **context**; `security` does not import gin.
 
 ```go
-middleware.SetIdentity(c, identity)                                      // in your app's auth middleware (see 30)
+middleware.SetIdentity(c, identity)                                      // in your app's auth middleware (see 31)
 id := security.MustGetIdentity[*domain.Identity](c.Request.Context())    // in handlers behind auth (panics if missing)
 id, ok := security.GetIdentity[*domain.Identity](ctx)                    // any context.Context
 ctx := security.WithIdentity(context.Background(), id)                   // tests / background jobs
@@ -1085,7 +1088,7 @@ junkit ships only the middleware every app needs to stay safe and easy to build 
 headers, tracing, CORS, body limits, rate limiting, panic recovery, access logs, route patterns and
 the debug switch. **Authentication and authorization are app policy and live in the app** (Jungo:
 `internal/middleware` — `BearerAuth`, `RequireSecret` and the permission `Guard`), because every
-app decides differently who may call what. See [30](#30-bearer-token-authentication).
+app decides differently who may call what. See [31](#31-bearer-token-authentication).
 
 | Middleware | What it does |
 |---|---|
@@ -1170,7 +1173,7 @@ auth := api.Group("/auth",
 	middleware.Limiter(middleware.LimiterOptions{RequestsPerSecond: 1, Burst: 5}, log, responder, notifier))
 ```
 
-See [28](#28-recommended-middleware-chain) for the recommended global order.
+See [29](#29-recommended-middleware-chain) for the recommended global order.
 
 ---
 
@@ -1445,9 +1448,23 @@ return slicex.Map(rows, mapUser), nil
 
 ---
 
+## 27. `stringx`
+
+Case conversion the standard `strings` package lacks. Use it instead of writing a local helper.
+
+```go
+stringx.ToSnake("AvatarURL")    // "avatar_url" (an acronym stays one word)
+stringx.ToPascal("order_item")  // "OrderItem"
+stringx.ToCamel("order_item")   // "orderItem"
+stringx.UpperFirst("đẹp trai")  // "Đẹp trai" (rune-safe)
+stringx.LowerFirst("Hello")     // "hello"
+```
+
+---
+
 # Part III — Recipes
 
-## 27. Full Fx wiring
+## 28. Full Fx wiring
 
 All packages together. In a real app, build the `Options` values from your own config struct
 (see `jungo`'s `internal/app/fx.go`).
@@ -1500,7 +1517,7 @@ fx.New(
 
 ---
 
-## 28. Recommended middleware chain
+## 29. Recommended middleware chain
 
 ```go
 r := gin.New()
@@ -1532,7 +1549,7 @@ Why this order:
 
 ---
 
-## 29. Repository + transaction + error mapping
+## 30. Repository + transaction + error mapping
 
 ```go
 // domain/errors.go — errors carry an HTTP-mapped code and an i18n key
@@ -1574,7 +1591,7 @@ if err != nil {
 
 ---
 
-## 30. Bearer-token authentication
+## 31. Bearer-token authentication
 
 junkit gives you the pieces — `security.TokenSealer`, `security.HashToken`, the identity context
 helpers — and the app writes the middleware, because who may call what is app policy. Jungo's
@@ -1644,7 +1661,7 @@ token, _ := sealer.Seal(raw)
 
 ---
 
-## 31. Debugging a request with `tracer`
+## 32. Debugging a request with `tracer`
 
 With `middleware.TracerDebug(middleware.TracerDebugOptions{QueryKey: "t_debug", QueryValue: "0604",
 SecretHeader: "X-Internal-Secret", Secret: "my-secret"})` installed and the `Decorate` hook set on
@@ -1675,7 +1692,7 @@ curl -s "http://localhost:8080/api/v1/users?t_debug=0604" -H "X-Internal-Secret:
 
 # Part IV — Contributing
 
-## 32. Development
+## 33. Development
 
 ```bash
 go build ./...                  # build every package

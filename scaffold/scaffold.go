@@ -11,6 +11,7 @@ import (
 	"text/template"
 
 	"github.com/jun-develop/junkit/console"
+	"github.com/jun-develop/junkit/stringx"
 )
 
 // FeatureData holds derived name forms for scaffold templates.
@@ -52,11 +53,11 @@ func NewFeatureData(name, module, table string) FeatureData {
 
 	return FeatureData{
 		Name:   name,
-		Pascal: toPascalCase(name),
-		Camel:  toCamelCase(name),
+		Pascal: stringx.ToPascal(name),
+		Camel:  stringx.ToCamel(name),
 		Plural: plural,
 		Table:  table,
-		Model:  toPascalCase(singularize(table)),
+		Model:  stringx.ToPascal(singularize(table)),
 		Module: module,
 	}
 }
@@ -96,32 +97,6 @@ func singularize(s string) string {
 	default:
 		return s
 	}
-}
-
-// toPascalCase converts a snake_case string to PascalCase (e.g. "order_item" -> "OrderItem").
-func toPascalCase(s string) string {
-	parts := strings.Split(s, "_")
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-
-	return b.String()
-}
-
-// toCamelCase converts a snake_case string to camelCase (e.g. "order_item" -> "orderItem").
-func toCamelCase(s string) string {
-	p := toPascalCase(s)
-	if p == "" {
-		return p
-	}
-
-	return strings.ToLower(p[:1]) + p[1:]
 }
 
 // File represents a single output template file.

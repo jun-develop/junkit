@@ -16,6 +16,7 @@ import (
 	"github.com/go-playground/validator/v10"
 
 	"github.com/jun-develop/junkit/i18n"
+	"github.com/jun-develop/junkit/stringx"
 )
 
 // Options configures the Validator instance.
@@ -111,7 +112,7 @@ func (v *Validator) jsonTypeError(err error) (map[string]string, bool) {
 		return nil, false
 	}
 
-	field := camelToSnake(typeErr.Field)
+	field := stringx.ToSnake(typeErr.Field)
 	t := typeErr.Type
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()

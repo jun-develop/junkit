@@ -1,27 +1,10 @@
 package validation
 
 import (
-	"regexp"
 	"strings"
+
+	"github.com/jun-develop/junkit/stringx"
 )
-
-// matchFirstCap and matchAllCap find the word boundaries camelToSnake splits on.
-var (
-	matchFirstCap = regexp.MustCompile("([A-Z]+)([A-Z][a-z])")
-	matchAllCap   = regexp.MustCompile("([a-z0-9])([A-Z])")
-)
-
-// camelToSnake converts a CamelCase or PascalCase string to snake_case.
-//
-// Usage:
-//
-//	camelToSnake("UserCreateRequest") // "user_create_request"
-func camelToSnake(str string) string {
-	snake := matchFirstCap.ReplaceAllString(str, "${1}_${2}")
-	snake = matchAllCap.ReplaceAllString(snake, "${1}_${2}")
-
-	return strings.ToLower(snake)
-}
 
 // normalizeFieldPath converts a validator namespace into a snake_case field path, dropping the
 // root struct name and any embedded "Request" segment.
@@ -42,11 +25,11 @@ func normalizeFieldPath(namespace string) string {
 		}
 
 		if idx := strings.Index(part, "["); idx != -1 {
-			base := camelToSnake(part[:idx])
+			base := stringx.ToSnake(part[:idx])
 			index := part[idx:]
 			filteredParts = append(filteredParts, base+index)
 		} else {
-			filteredParts = append(filteredParts, camelToSnake(part))
+			filteredParts = append(filteredParts, stringx.ToSnake(part))
 		}
 	}
 

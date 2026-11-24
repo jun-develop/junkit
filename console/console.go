@@ -4,8 +4,8 @@ package console
 import (
 	"fmt"
 	"os"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/jun-develop/junkit/stringx"
 )
 
 // ANSI escape codes used to style output.
@@ -24,7 +24,7 @@ const (
 //
 //	console.Infof("starting migration for %s", dbName)
 func Infof(format string, a ...any) {
-	fmt.Printf(colorCyan+"⚡ "+ensureUpper(format)+colorReset+"\n", a...)
+	fmt.Printf(colorCyan+"⚡ "+stringx.UpperFirst(format)+colorReset+"\n", a...)
 }
 
 // Successf prints a green success message to stdout.
@@ -33,7 +33,7 @@ func Infof(format string, a ...any) {
 //
 //	console.Successf("migration applied successfully")
 func Successf(format string, a ...any) {
-	fmt.Printf(colorGreen+" ✅ "+ensureUpper(format)+colorReset+"\n", a...)
+	fmt.Printf(colorGreen+" ✅ "+stringx.UpperFirst(format)+colorReset+"\n", a...)
 }
 
 // Warnf prints a yellow warning message to stdout prefixed with "Warning:".
@@ -42,7 +42,7 @@ func Successf(format string, a ...any) {
 //
 //	console.Warnf("no .env file found, using defaults")
 func Warnf(format string, a ...any) {
-	fmt.Printf(colorYellow+"⚠️  Warning: "+ensureLower(format)+colorReset+"\n", a...)
+	fmt.Printf(colorYellow+"⚠️  Warning: "+stringx.LowerFirst(format)+colorReset+"\n", a...)
 }
 
 // Fatalf prints a red error message to stdout prefixed with "Error:" and exits with code 1.
@@ -51,7 +51,7 @@ func Warnf(format string, a ...any) {
 //
 //	console.Fatalf("failed to connect to database: %v", err)
 func Fatalf(format string, a ...any) {
-	fmt.Printf(colorRed+"⛔ Error: "+ensureLower(format)+colorReset+"\n", a...)
+	fmt.Printf(colorRed+"⛔ Error: "+stringx.LowerFirst(format)+colorReset+"\n", a...)
 	os.Exit(1)
 }
 
@@ -61,33 +61,5 @@ func Fatalf(format string, a ...any) {
 //
 //	console.Stepf("🏗️", "generating handler for %s", featureName)
 func Stepf(icon, format string, a ...any) {
-	fmt.Printf(colorBold+icon+" "+ensureUpper(format)+colorReset+"\n", a...)
-}
-
-// ensureUpper returns s with its first rune uppercased.
-func ensureUpper(s string) string {
-	if s == "" {
-		return ""
-	}
-
-	r, size := utf8.DecodeRuneInString(s)
-	if unicode.IsUpper(r) {
-		return s
-	}
-
-	return string(unicode.ToUpper(r)) + s[size:]
-}
-
-// ensureLower returns s with its first rune lowercased.
-func ensureLower(s string) string {
-	if s == "" {
-		return ""
-	}
-
-	r, size := utf8.DecodeRuneInString(s)
-	if unicode.IsLower(r) {
-		return s
-	}
-
-	return string(unicode.ToLower(r)) + s[size:]
+	fmt.Printf(colorBold+icon+" "+stringx.UpperFirst(format)+colorReset+"\n", a...)
 }
