@@ -53,6 +53,7 @@ func (r *responder) Send(c *gin.Context, statusCode int, key string, args ...any
 	c.JSON(statusCode, Response{
 		Status:  statusText(statusCode),
 		Code:    httpStatusToErrorCode(statusCode),
+		Reason:  errorReason(statusCode, key),
 		Message: r.Translate(key, args...),
 		APIInfo: getAPIInfo(c),
 	})
@@ -63,6 +64,7 @@ func (r *responder) SendWithData(c *gin.Context, statusCode int, key string, dat
 	res := Response{
 		Status:  statusText(statusCode),
 		Code:    httpStatusToErrorCode(statusCode),
+		Reason:  errorReason(statusCode, key),
 		Message: r.Translate(key, args...),
 		APIInfo: getAPIInfo(c),
 	}
@@ -109,6 +111,7 @@ func (r *responder) Error(c *gin.Context, err error) {
 		c.JSON(statusCode, Response{
 			Status:  "error",
 			Code:    appErr.Code,
+			Reason:  appErr.Message,
 			Message: r.Translate(appErr.Message),
 			APIInfo: getAPIInfo(c),
 		})
@@ -186,6 +189,15 @@ func httpStatusToErrorCode(status int) ErrorCode {
 	default:
 		return Internal
 	}
+}
+
+// errorReason returns key for an error status (>= 400), "" otherwise: success bodies carry no reason.
+func errorReason(status int, key string) string {
+	if status < http.StatusBadRequest {
+		return ""
+	}
+
+	return key
 }
 
 // statusText returns "error" for status >= 400, "success" otherwise.

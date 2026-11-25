@@ -229,6 +229,7 @@ curl -s -XPOST localhost:8080/users -d '{"email":"bad","password":"x"}' | jq
 {
   "status": "error",
   "code": "UNPROCESSABLE_ENTITY",
+  "reason": "validation_error",
   "message": "Validation error",
   "error": {
     "email": "email must be a valid email format",
@@ -419,6 +420,7 @@ maps domain errors to HTTP status codes.
 {
   "status": "success",
   "code": "NOT_FOUND",
+  "reason": "user_not_found",
   "message": "User not found",
   "data": { },
   "error": { },
@@ -433,7 +435,9 @@ maps domain errors to HTTP status codes.
 ```
 
 Empty fields are omitted. `status` is `"success"` below 400 and `"error"` from 400; `code` is the
-`ErrorCode` of an error response. `api_info` is filled from the values `middleware.Trace` stores on
+`ErrorCode` of an error response, and `reason` its untranslated message key (`AppError.Message`,
+or the key passed to `Send`/`SendWithData`), so clients can branch on it whatever the language.
+`api_info` is filled from the values `middleware.Trace` stores on
 the gin context (`StartTimeContextKey`, `VersionContextKey`, `EnvContextKey`) and the trace ID it
 puts in the request context (`logger.GetTraceID(c.Request.Context())`). A paginated list puts
 `{"items": [...], "pagination": {...}}` (`response.PaginatedData`) under `data`.

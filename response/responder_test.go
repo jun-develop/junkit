@@ -5,11 +5,11 @@ package response_test
 // =============================================================================
 //
 // File: responder_test.go
-// Purpose: Verify the JSON envelope the Responder writes: status, code, message, data, error and api_info.
+// Purpose: Verify the JSON envelope the Responder writes: status, code, reason, message, data, error and api_info.
 // Type: Unit
 //
-// Test functions: 12
-// Total scenarios: 41
+// Test functions: 13
+// Total scenarios: 49
 //
 // #   Test Case                                           Scenario                                       Expected Result
 // 1   TestResponder_Send_WritesSuccessEnvelope            Send 200 with a message key                    200, status "success", translated message, api_info set
@@ -53,6 +53,14 @@ package response_test
 // 39  TestResponder_EveryErrorResponseHasACode            Error with a plain error                       INTERNAL_SERVER_ERROR code
 // 40  TestResponder_EveryErrorResponseHasACode            Send 200                                       No code
 // 41  TestResponder_EveryErrorResponseHasACode            SendWithData 201                               No code
+// 42  TestResponder_ErrorResponsesCarryTheirReason      Send 401                                       reason = the message key
+// 43  TestResponder_ErrorResponsesCarryTheirReason      SendWithData 422                               reason = the message key
+// 44  TestResponder_ErrorResponsesCarryTheirReason      Error with an AppError                         reason = the AppError's key
+// 45  TestResponder_ErrorResponsesCarryTheirReason      Error with a wrapped AppError                  reason = the AppError's key
+// 46  TestResponder_ErrorResponsesCarryTheirReason      Error with a plain error                       reason = "internal_server_error"
+// 47  TestResponder_ErrorResponsesCarryTheirReason      Send 200                                       No reason
+// 48  TestResponder_ErrorResponsesCarryTheirReason      SendWithData 201                               No reason
+// 49  TestResponder_ErrorResponsesCarryTheirReason      Pagination                                     No reason
 //
 // =============================================================================
 
@@ -400,6 +408,40 @@ func TestResponder_EveryErrorResponseHasACode(t *testing.T) {
 
 			if got := decodeResponse(t, w).Code; got != tt.want {
 				t.Errorf("Code = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResponder_ErrorResponsesCarryTheirReason(t *testing.T) {
+	responder := response.NewResponder(i18n.NewTranslator())
+	meta := pagination.NewPagination(1, 10, 0)
+	fields := map[string]string{"f": "bad"}
+	wrapped := response.Wrap(response.Internal, "failed_to_save", plainError)
+
+	tests := []struct {
+		name  string
+		write func(c *gin.Context)
+		want  string
+	}{
+		{"Send 401", func(c *gin.Context) { responder.Send(c, 401, "unauthorized_token") }, "unauthorized_token"},
+		{"SendWithData 422", func(c *gin.Context) { responder.SendWithData(c, 422, "validation_error", fields) }, "validation_error"},
+		{"Error AppError", func(c *gin.Context) { responder.Error(c, response.New(response.Unauthorized, "token_expired")) }, "token_expired"},
+		{"Error wrapped AppError", func(c *gin.Context) { responder.Error(c, wrapped) }, "failed_to_save"},
+		{"Error plain err", func(c *gin.Context) { responder.Error(c, plainError) }, "internal_server_error"},
+		{"Send 200 has none", func(c *gin.Context) { responder.Send(c, 200, "operation_successful") }, ""},
+		{"SendWithData 201 has none", func(c *gin.Context) { responder.SendWithData(c, 201, "operation_successful", 1) }, ""},
+		{"Pagination has none", func(c *gin.Context) { responder.Pagination(c, 200, "operation_successful", []int{}, meta) }, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w, c := newResponderTestContext()
+
+			tt.write(c)
+
+			if got := decodeResponse(t, w).Reason; got != tt.want {
+				t.Errorf("Reason = %q, want %q", got, tt.want)
 			}
 		})
 	}

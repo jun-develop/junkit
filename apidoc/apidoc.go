@@ -269,6 +269,7 @@ var (
 	errorSchema = map[string]any{"type": "object", "properties": map[string]any{
 		"status":   map[string]any{"type": "string", "example": "error"},
 		"code":     map[string]string{"type": "string"},
+		"reason":   map[string]any{"type": "string", "example": "token_expired"},
 		"message":  map[string]string{"type": "string"},
 		"error":    map[string]any{"type": "object", "additionalProperties": map[string]string{"type": "string"}},
 		"api_info": ref("APIInfo"),

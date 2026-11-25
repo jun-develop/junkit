@@ -30,6 +30,7 @@ type PaginatedData struct {
 type Response struct {
 	Status  string    `json:"status"`
 	Code    ErrorCode `json:"code,omitempty"`
+	Reason  string    `json:"reason,omitempty"`
 	Message string    `json:"message,omitempty"`
 	Data    any       `json:"data,omitempty"`
 	Error   any       `json:"error,omitempty"`
