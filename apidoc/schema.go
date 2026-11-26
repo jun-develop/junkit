@@ -3,6 +3,7 @@ package apidoc
 import (
 	"encoding"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -27,15 +28,17 @@ func typeOf(v any) reflect.Type {
 	return t
 }
 
-// schemaOf returns the JSON schema of t, naming struct fields by tagKey ("json" or "form").
-func schemaOf(t reflect.Type, tagKey string) map[string]any {
-	return schemaFor(t, tagKey, map[reflect.Type]bool{})
+// schemaOf returns the JSON schema of t, naming fields by tagKey ("json" or "form"). Response fields are
+// required unless omitempty/omitzero; others take required from binding tags. Slices and maps are not
+// nullable: DTOs never return a nil one, and a list that can be null is declared *[]T.
+func schemaOf(t reflect.Type, tagKey string, response bool) map[string]any {
+	return schemaFor(t, tagKey, response, map[reflect.Type]bool{})
 }
 
 // schemaFor is schemaOf with seen tracking the structs being walked, so recursive types end.
-func schemaFor(t reflect.Type, tagKey string, seen map[reflect.Type]bool) map[string]any {
+func schemaFor(t reflect.Type, tagKey string, response bool, seen map[reflect.Type]bool) map[string]any {
 	if t.Kind() == reflect.Pointer {
-		s := schemaFor(t.Elem(), tagKey, seen)
+		s := schemaFor(t.Elem(), tagKey, response, seen)
 		s["nullable"] = true
 		return s
 	}
@@ -65,11 +68,11 @@ func schemaFor(t reflect.Type, tagKey string, seen map[reflect.Type]bool) map[st
 			return map[string]any{"type": "string", "format": "byte"}
 		}
 
-		return map[string]any{"type": "array", "items": schemaFor(t.Elem(), tagKey, seen)}
+		return map[string]any{"type": "array", "items": schemaFor(t.Elem(), tagKey, response, seen)}
 	case reflect.Map:
-		return map[string]any{"type": "object", "additionalProperties": schemaFor(t.Elem(), tagKey, seen)}
+		return map[string]any{"type": "object", "additionalProperties": schemaFor(t.Elem(), tagKey, response, seen)}
 	case reflect.Struct:
-		return structSchema(t, tagKey, seen)
+		return structSchema(t, tagKey, response, seen)
 	}
 
 	// interface{} and anything else: any value.
@@ -80,7 +83,7 @@ func schemaFor(t reflect.Type, tagKey string, seen map[reflect.Type]bool) map[st
 func queryParams(v any) []map[string]any {
 	var params []map[string]any
 	for _, f := range fields(typeOf(v), "form") {
-		s := schemaOf(f.typ, "form")
+		s := schemaOf(f.typ, "form", false)
 		delete(s, "nullable")
 		required := applyRules(s, f.binding)
 		setExample(s, f.example)
@@ -93,6 +96,7 @@ func queryParams(v any) []map[string]any {
 // field is one struct field as the schema sees it.
 type field struct {
 	name, binding, example string
+	omit                   bool
 	typ                    reflect.Type
 }
 
@@ -101,7 +105,7 @@ func fields(t reflect.Type, tagKey string) []field {
 	var out []field
 	for i := range t.NumField() {
 		f := t.Field(i)
-		name, _, _ := strings.Cut(f.Tag.Get(tagKey), ",")
+		name, opts, _ := strings.Cut(f.Tag.Get(tagKey), ",")
 		if name == "-" {
 			continue
 		}
@@ -126,7 +130,11 @@ func fields(t reflect.Type, tagKey string) []field {
 			name = f.Name
 		}
 
-		out = append(out, field{name: name, binding: f.Tag.Get("binding"), example: f.Tag.Get("example"), typ: f.Type})
+		omit := slices.ContainsFunc(strings.Split(opts, ","), func(o string) bool {
+			return o == "omitempty" || o == "omitzero"
+		})
+
+		out = append(out, field{name: name, binding: f.Tag.Get("binding"), example: f.Tag.Get("example"), omit: omit, typ: f.Type})
 	}
 
 	return out
@@ -229,7 +237,7 @@ func typed(s map[string]any, v string) any {
 }
 
 // structSchema builds an object schema for struct t (handles recursive types).
-func structSchema(t reflect.Type, tagKey string, seen map[reflect.Type]bool) map[string]any {
+func structSchema(t reflect.Type, tagKey string, response bool, seen map[reflect.Type]bool) map[string]any {
 	if seen[t] {
 		return map[string]any{"type": "object"}
 	}
@@ -240,8 +248,13 @@ func structSchema(t reflect.Type, tagKey string, seen map[reflect.Type]bool) map
 	props := map[string]any{}
 	var required []string
 	for _, f := range fields(t, tagKey) {
-		s := schemaFor(f.typ, tagKey, seen)
-		if applyRules(s, f.binding) {
+		s := schemaFor(f.typ, tagKey, response, seen)
+		req := applyRules(s, f.binding)
+		if response {
+			req = !f.omit
+		}
+
+		if req {
 			required = append(required, f.name)
 		}
 

@@ -182,7 +182,7 @@ func requestBody(r Route) map[string]any {
 
 		return map[string]any{"required": true, "content": map[string]any{"multipart/form-data": map[string]any{"schema": schema}}}
 	case r.Body != nil:
-		return map[string]any{"required": true, "content": jsonContent(schemaOf(typeOf(r.Body), "json"))}
+		return map[string]any{"required": true, "content": jsonContent(schemaOf(typeOf(r.Body), "json", false))}
 	}
 
 	return nil
@@ -200,23 +200,25 @@ func responses(op Operation, hasPathParams bool) map[string]any {
 		"message":  map[string]string{"type": "string"},
 		"api_info": ref("APIInfo"),
 	}
+	required := []string{"status", "message", "api_info"}
 
 	if op.Response != nil {
-		data := schemaOf(typeOf(op.Response), "json")
+		data := schemaOf(typeOf(op.Response), "json", true)
 		if op.Paginated {
 			data = map[string]any{"type": "object", "properties": map[string]any{
 				"items":      map[string]any{"type": "array", "items": data},
 				"pagination": ref("Pagination"),
-			}}
+			}, "required": []string{"items", "pagination"}}
 		}
 
 		envelope["data"] = data
+		required = append(required, "data")
 	}
 
 	out := map[string]any{
 		strconv.Itoa(status): map[string]any{
 			"description": http.StatusText(status),
-			"content":     jsonContent(map[string]any{"type": "object", "properties": envelope}),
+			"content":     jsonContent(map[string]any{"type": "object", "properties": envelope, "required": required}),
 		},
 	}
 
@@ -251,7 +253,7 @@ var (
 		"latency":   map[string]string{"type": "string"},
 		"version":   map[string]string{"type": "string"},
 		"env":       map[string]string{"type": "string"},
-	}}
+	}, "required": []string{"timestamp"}} // the other fields are omitempty
 
 	// paginationSchema is the pagination object of a paginated list.
 	paginationSchema = map[string]any{"type": "object", "properties": map[string]any{
@@ -263,7 +265,7 @@ var (
 		"has_prev":    map[string]string{"type": "boolean"},
 		"next_page":   map[string]any{"type": "integer", "nullable": true},
 		"prev_page":   map[string]any{"type": "integer", "nullable": true},
-	}}
+	}, "required": []string{"page", "page_size", "total_items", "total_pages", "has_next", "has_prev", "next_page", "prev_page"}}
 
 	// errorSchema is the envelope of every error; "error" holds field -> message on a validation error.
 	errorSchema = map[string]any{"type": "object", "properties": map[string]any{
