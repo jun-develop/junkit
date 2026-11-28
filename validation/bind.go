@@ -1,12 +1,19 @@
 package validation
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"github.com/jun-develop/junkit/response"
+)
+
+// Errors the bind helpers answer with, exported so an app can list them in its API docs.
+var (
+	// ErrValidation is the 422 a failed bind answers; its "error" holds field -> message, or one
+	// message when the body is not valid JSON at all.
+	ErrValidation = response.New(response.UnprocessableEntity, "validation_error")
+	// ErrInvalidUUID is ParseUUID's answer to a ":uuid" that is not a UUID.
+	ErrInvalidUUID = response.New(response.BadRequest, "invalid_uuid")
 )
 
 // uuidParam binds the ":uuid" URI path parameter.
@@ -47,7 +54,7 @@ func ParseUUID(ctx *gin.Context, responder response.Responder, validator *Valida
 
 	uid, err := uuid.Parse(params.UUID)
 	if err != nil {
-		responder.Send(ctx, http.StatusBadRequest, "invalid_uuid")
+		responder.Error(ctx, ErrInvalidUUID)
 		return uuid.Nil, false
 	}
 
@@ -57,7 +64,7 @@ func ParseUUID(ctx *gin.Context, responder response.Responder, validator *Valida
 // bound reports whether a bind succeeded, answering 422 with the field errors when it did not.
 func bound(ctx *gin.Context, responder response.Responder, validator *Validator, err error) bool {
 	if err != nil {
-		responder.SendWithData(ctx, http.StatusUnprocessableEntity, "validation_error", validator.GetValidationErrors(ctx, err))
+		responder.SendWithData(ctx, ErrValidation.Code.HTTPStatus(), ErrValidation.Message, validator.GetValidationErrors(ctx, err))
 		return false
 	}
 

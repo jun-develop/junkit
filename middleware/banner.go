@@ -298,7 +298,7 @@ func deny(c *gin.Context, responder response.Responder, until int64) {
 		c.Header("Retry-After", strconv.FormatInt(wait, 10))
 	}
 
-	responder.Send(c, http.StatusForbidden, "access_denied")
+	responder.Error(c, ErrAccessDenied)
 	c.Abort()
 }
 

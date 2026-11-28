@@ -23,18 +23,52 @@ const mxCacheTTL = 10 * time.Minute
 // mxCacheMax caps the lookup cache, whose keys come from user input.
 const mxCacheMax = 10_000
 
+// Patterns of the custom rules, written in the common subset of Go RE2 and ECMAScript so Pattern
+// can hand them to clients unchanged.
+const (
+	emailPattern        = `^[a-zA-Z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
+	specialClass        = `[!@#$%^&*()_+\-=\[\]{};:'",.<>?/\\|]`
+	slugPattern         = `^[a-z0-9]+(?:[-.][a-z0-9]+)*$`
+	searchPattern       = `^[a-zA-Z0-9\s]+$`
+	alphanumDashPattern = `^[a-zA-Z0-9_-]+$`
+	phonePattern        = `^(\+)?([0-9]){7,15}$`
+)
+
 // emailRegex and the patterns below back the custom validation rules.
 var (
-	emailRegex        = regexp.MustCompile(`^[a-zA-Z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
+	emailRegex        = regexp.MustCompile(emailPattern)
 	lowerRegex        = regexp.MustCompile(`[a-z]`)
 	upperRegex        = regexp.MustCompile(`[A-Z]`)
 	digitRegex        = regexp.MustCompile(`[0-9]`)
-	specialRegex      = regexp.MustCompile(`[!@#$%^&*()_+\-=\[\]{};:'",.<>?/\\|]`)
-	slugRegex         = regexp.MustCompile(`^[a-z0-9]+(?:[-.][a-z0-9]+)*$`)
-	searchRegex       = regexp.MustCompile(`^[a-zA-Z0-9\s]+$`)
-	alphanumDashRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
-	phoneRegex        = regexp.MustCompile(`^(\+)?([0-9]){7,15}$`)
+	specialRegex      = regexp.MustCompile(specialClass)
+	slugRegex         = regexp.MustCompile(slugPattern)
+	searchRegex       = regexp.MustCompile(searchPattern)
+	alphanumDashRegex = regexp.MustCompile(alphanumDashPattern)
+	phoneRegex        = regexp.MustCompile(phonePattern)
 )
+
+// rulePatterns are the ECMAScript patterns a client can check before sending. password_strong needs
+// lookaheads, which RE2 lacks, so it is spelled out here; email_advanced also checks the domain on
+// the server (disposable list, mail host), which no pattern can.
+var rulePatterns = map[string]string{
+	"email_advanced":  emailPattern,
+	"password_strong": `^(?=[\s\S]*[a-z])(?=[\s\S]*[A-Z])(?=[\s\S]*[0-9])(?=[\s\S]*` + specialClass + `)[\s\S]{8,}$`,
+	"slug":            slugPattern,
+	"search":          searchPattern,
+	"alphanum_dash":   alphanumDashPattern,
+	"phone_advanced":  phonePattern,
+}
+
+// Pattern returns the ECMAScript regular expression a value must match to pass rule, for API docs and
+// client-side checks; ok is false for a rule no pattern expresses.
+//
+// Usage:
+//
+//	pattern, ok := validation.Pattern("phone_advanced")
+func Pattern(rule string) (pattern string, ok bool) {
+	pattern, ok = rulePatterns[rule]
+	return pattern, ok
+}
 
 // resolver is the part of *net.Resolver the email_advanced rule uses; tests swap in a fake.
 type resolver interface {

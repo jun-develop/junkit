@@ -102,7 +102,7 @@ func (r *responder) Translate(key string, args ...any) string {
 func (r *responder) Error(c *gin.Context, err error) {
 	var appErr *AppError
 	if errors.As(err, &appErr) {
-		statusCode := errorCodeToHTTPStatus(appErr.Code)
+		statusCode := appErr.Code.HTTPStatus()
 		if statusCode >= http.StatusInternalServerError || appErr.Cause != nil {
 			// The returned *gin.Error is only a handle to what was recorded.
 			_ = c.Error(err)
@@ -128,8 +128,8 @@ func (r *responder) Error(c *gin.Context, err error) {
 	r.Send(c, http.StatusInternalServerError, "internal_server_error")
 }
 
-// errorCodeToHTTPStatus maps ErrorCode to HTTP status, defaulting to 500.
-func errorCodeToHTTPStatus(code ErrorCode) int {
+// HTTPStatus returns the HTTP status an error with this code is answered with, defaulting to 500.
+func (code ErrorCode) HTTPStatus() int {
 	switch code {
 	case BadRequest:
 		return http.StatusBadRequest

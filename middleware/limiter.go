@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"fmt"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -221,7 +220,7 @@ func Limiter(opts LimiterOptions, logger *zap.Logger, responder response.Respond
 			sendAlert(c, notifier, "🚦 <b>Rate Limit Exceeded</b>", "IP", ip)
 		}
 
-		responder.Send(c, http.StatusTooManyRequests, "too_many_requests")
+		responder.Error(c, ErrTooManyRequests)
 		c.Abort()
 	}
 }

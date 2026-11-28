@@ -8,8 +8,8 @@ package validation_test
 // Purpose: Verify each custom validation tag registered by RegisterCustomValidation (offline only).
 // Type: Unit
 //
-// Test functions: 12
-// Total scenarios: 42
+// Test functions: 13
+// Total scenarios: 46
 //
 // #   Test Case                                        Scenario                           Expected Result
 // 1   TestValidator_PasswordStrongTag                  Meets every requirement            Valid
@@ -54,6 +54,10 @@ package validation_test
 // 40  TestNewValidator_LoadsBlocklistFromPath          Domain listed in the file          Email rejected
 // 41  TestNewValidator_LoadsBlocklistFromPath          Upper-case entry in the file       Email rejected (offline smoke test; matching proven in internal test)
 // 42  TestNewValidator_LoadsBlocklistFromPath          Blocklist file missing             NewValidator returns os.ErrNotExist
+// 43  TestPattern_AgreesWithRule                       RE2-compatible rule patterns       Pattern accepts exactly what the rule accepts
+// 44  TestPattern_AgreesWithRule                       email_advanced pattern             Rejects every malformed sample
+// 45  TestPattern_AgreesWithRule                       password_strong pattern            Present (lookaheads; checked against JS by hand)
+// 46  TestPattern_AgreesWithRule                       Rule without a pattern             ok is false
 //
 // =============================================================================
 
@@ -61,6 +65,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	"github.com/go-playground/validator/v10"
@@ -424,6 +429,60 @@ func TestNewValidator_LoadsBlocklistFromPath(t *testing.T) {
 		_, err := validation.NewValidator(validation.Options{BlocklistPath: filepath.Join(dir, "missing.conf")}, nil)
 		if !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("NewValidator() error = %v, want os.ErrNotExist", err)
+		}
+	})
+}
+
+func TestPattern_AgreesWithRule(t *testing.T) {
+	v := newTestValidator(t)
+	samples := []string{
+		"hello-world", "v1.2", "Hello World", "-x", "abc_DEF-1", "a.b", "", " ", "x y z",
+		"+84901234567", "0901234567", "12345", "090-123", "+", "abc", "1234567890123456",
+	}
+
+	for _, rule := range []string{"slug", "search", "alphanum_dash", "phone_advanced"} {
+		t.Run(rule, func(t *testing.T) {
+			pattern, ok := validation.Pattern(rule)
+			if !ok {
+				t.Fatalf("Pattern(%q) ok = false", rule)
+			}
+
+			re := regexp.MustCompile(pattern)
+			for _, s := range samples {
+				if s == "" {
+					continue // the rules never see an empty value behind omitempty
+				}
+
+				if got, want := re.MatchString(s), v.Var(s, rule) == nil; got != want {
+					t.Errorf("%q: pattern match = %v, rule ok = %v", s, got, want)
+				}
+			}
+		})
+	}
+
+	t.Run("email_advanced rejects malformed addresses", func(t *testing.T) {
+		pattern, _ := validation.Pattern("email_advanced")
+		re := regexp.MustCompile(pattern)
+		for _, s := range []string{"plain", "a@", "@b.com", "a b@c.com", "a@-b.com"} {
+			if re.MatchString(s) {
+				t.Errorf("%q matched the email pattern", s)
+			}
+		}
+
+		if !re.MatchString("first.last+tag@mail.example.com") {
+			t.Error("a valid address did not match the email pattern")
+		}
+	})
+
+	t.Run("password_strong has a pattern", func(t *testing.T) {
+		if _, ok := validation.Pattern("password_strong"); !ok {
+			t.Fatal("Pattern(password_strong) ok = false")
+		}
+	})
+
+	t.Run("rule without a pattern", func(t *testing.T) {
+		if _, ok := validation.Pattern("min_int"); ok {
+			t.Fatal("Pattern(min_int) ok = true")
 		}
 	})
 }

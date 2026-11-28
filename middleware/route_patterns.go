@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"net/http"
 	"regexp"
 	"strconv"
 
@@ -28,7 +27,7 @@ func RoutePatterns(patterns map[string]func(string) bool, responder response.Res
 	return func(c *gin.Context) {
 		for _, p := range c.Params {
 			if match, ok := patterns[p.Key]; ok && !match(p.Value) {
-				responder.Send(c, http.StatusNotFound, "api_not_found")
+				responder.Error(c, ErrAPINotFound)
 				c.Abort()
 
 				return

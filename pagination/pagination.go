@@ -16,10 +16,15 @@ type Pagination struct {
 	PrevPage   *int  `json:"prev_page"`
 }
 
+// PageRequest is the page part of a list query, for lists that neither search nor sort.
+type PageRequest struct {
+	Page     int `form:"page" binding:"omitempty,min=1" example:"1"`
+	PageSize int `form:"page_size" binding:"omitempty,min=1,max=100" example:"10"`
+}
+
 // Request represents standard list query parameters.
 type Request struct {
-	Page      int    `form:"page" binding:"omitempty,min=1" example:"1"`
-	PageSize  int    `form:"page_size" binding:"omitempty,min=1,max=100" example:"10"`
+	PageRequest
 	Search    string `form:"search" binding:"omitempty" example:"John"`
 	SortBy    string `form:"sort_by" binding:"omitempty" example:"created_at"`
 	SortOrder string `form:"sort_order" binding:"omitempty,oneof=asc desc" example:"desc"`
@@ -79,13 +84,7 @@ func NewPagination(page, pageSize int, totalItems int64) Pagination {
 //	_ = ctx.ShouldBindQuery(&req)
 //	req.SetDefaults("created_at", "desc")
 func (r *Request) SetDefaults(defaultSortBy, defaultSortOrder string) {
-	if r.Page <= 0 {
-		r.Page = 1
-	}
-
-	if r.PageSize <= 0 {
-		r.PageSize = 10
-	}
+	r.PageRequest.SetDefaults()
 
 	if r.SortBy == "" {
 		r.SortBy = defaultSortBy
@@ -96,9 +95,26 @@ func (r *Request) SetDefaults(defaultSortBy, defaultSortOrder string) {
 	}
 }
 
+// SetDefaults fills a missing or invalid page (1) and page size (10).
+//
+// Usage:
+//
+//	var req pagination.PageRequest
+//	_ = ctx.ShouldBindQuery(&req)
+//	req.SetDefaults()
+func (r *PageRequest) SetDefaults() {
+	if r.Page <= 0 {
+		r.Page = 1
+	}
+
+	if r.PageSize <= 0 {
+		r.PageSize = 10
+	}
+}
+
 // GetOffset returns the SQL OFFSET for the current page, never negative, using GetLimit as the
 // page size so a manually built Request cannot skip validation.
-func (r *Request) GetOffset() int32 {
+func (r *PageRequest) GetOffset() int32 {
 	if r.Page <= 1 {
 		return 0
 	}
@@ -114,6 +130,6 @@ func (r *Request) GetOffset() int32 {
 }
 
 // GetLimit returns the SQL LIMIT for the current page, clamped to [1, 100].
-func (r *Request) GetLimit() int32 {
+func (r *PageRequest) GetLimit() int32 {
 	return int32(min(max(r.PageSize, 1), 100))
 }

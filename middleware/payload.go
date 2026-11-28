@@ -84,9 +84,9 @@ func Payload(opts PayloadOptions, responder response.Responder) gin.HandlerFunc 
 		if err != nil {
 			var tooLarge *http.MaxBytesError
 			if errors.As(err, &tooLarge) {
-				responder.Send(c, http.StatusRequestEntityTooLarge, "request_body_too_large")
+				responder.Error(c, ErrBodyTooLarge)
 			} else {
-				responder.Send(c, http.StatusBadRequest, "invalid_request")
+				responder.Error(c, ErrInvalidBody)
 			}
 
 			c.Abort()
